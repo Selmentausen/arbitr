@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-from src.models.case import CaseBase
+from src.models.case import CaseBase, CaseParticipant, CaseInstance, CaseDocument
 from src.utils.logger import get_logger
 
 
@@ -70,6 +70,62 @@ def parse_case_list(html_content: str) -> tuple[List[CaseBase], Dict[str, Any]]:
     
     return cases, pagination
 
+def parse_case_card(html_content: str) -> Dict[str, Any]:
+    """
+    Parse case card HTML into structured components
+
+    Returns a dictionary with parsed participants, documents and extracted data
+    that can be merged into a Case object by the calller.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    result = {
+        "participants": {},
+        "instances": [],
+        "extracted_data": {}
+    }
+
+    for section in ["plaintiff", "defendant"]:
+        for li in soup.select(f".{section}s li"):
+            name_elem = li.select_one('a')
+            detail_elem =li.select_one('.js-rolloverHtml')
+
+            if name_elem:
+                name = name_elem.get_text(strip=True)
+                detail = detail_elem.get_text(strip=True) if detail_elem else None
+                #TODO actually parse the ogrn, inn and address from detail
+                result["participants"].setdefault(section, []).append(CaseParticipant(name=name, address=detail))
+
+    for instance_block in soup.select('.js-chrono-item-header'):
+        court_elem = instance_block.select_one('.instantion-name a')
+        court_name = court_elem.get_text(strip=True) if court_elem else "Неизвестный суд"
+        level_elem = instance_block.select_one('.l-col-strong')
+        instance_level = level_elem.get_text(strip=True) if level_elem else None
+
+        docs = []
+        doc_links = instance_block.select('a[href*="/PdfDocument/"], a[href*="/Document/"]',)
+
+        for link in doc_links:
+            url = link.get('href')
+            case_result_text = link.get_text(strip=True)
+            filename = url.split('/')[-1] if '/' in url else "document.pdf"
+
+            doc = CaseDocument(
+                filename=filename,
+                url=url,
+                type=instance_level or "document"
+            )
+            docs.append(doc)
+        
+            if case_result_text:
+                result["extracted_data"].setdefault(court_name, {})["result"] = case_result_text
+        
+        if docs:
+            instance = CaseInstance(court_name=court_name, documents=docs)
+            result["instances"].append(instance)
+
+    return result
+
+    
 
 def _extract_case_from_row(row) -> Optional[CaseBase]:
     """

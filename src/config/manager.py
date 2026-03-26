@@ -174,10 +174,10 @@ class ConfigManager:
                     
     def _read_dictionary_file(self, file_path: Path) -> list[str]:
         """Read a dictionary text file into a list of strings."""
-        if not path.exists():
+        if not file_path.exists():
             logger.warning(f"Dictionary file not found: {path}")
             return []
-        with open(path, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
         
         if "," in content:

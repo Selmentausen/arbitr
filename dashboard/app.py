@@ -2,7 +2,7 @@
 Arbitr Dashboard — Streamlit app for reviewing scraped court cases.
 
 Run with:
-    cd d:\dev\2026\Arbitr
+    cd d:\\dev\\2026\\Arbitr
     poetry run streamlit run dashboard/app.py
 """
 
@@ -123,7 +123,7 @@ def page_overview(repo: CaseRepository):
                 hole=0.4,
             )])
             fig.update_layout(height=350, margin=dict(t=20, b=20, l=20, r=20))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with col_right:
         st.subheader("По категории")
@@ -136,12 +136,14 @@ def page_overview(repo: CaseRepository):
                 color=list(cats.keys()),
             )
             fig.update_layout(height=350, margin=dict(t=20, b=20, l=20, r=20), showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 
 def page_case_list(repo: CaseRepository):
     """Case list with filters and pagination."""
     st.title("📋 Список дел")
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = 1
 
     # Filters
     col1, col2, col3, col4 = st.columns(4)
@@ -173,10 +175,10 @@ def page_case_list(repo: CaseRepository):
 
     # Pagination
     page_size = 15
-    page_num = st.number_input("Страница", min_value=1, value=1, step=1)
+    current_page = st.session_state.current_page
 
     cases, total = repo.get_all_cases(
-        page=page_num,
+        page=current_page,
         page_size=page_size,
         status=status_filter,
         category=category_filter,
@@ -185,8 +187,6 @@ def page_case_list(repo: CaseRepository):
         sort_desc=(sort_by != "case_number"),
     )
 
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    st.caption(f"Показано {len(cases)} из {total} дел (стр. {page_num}/{total_pages})")
 
     if not cases:
         st.info("Нет дел, соответствующих фильтрам.")
@@ -203,6 +203,24 @@ def page_case_list(repo: CaseRepository):
             expanded=False,
         ):
             _render_case_detail(repo, case)
+    
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    st.markdown("---")
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("Назад", width="stretch", disabled=(current_page <= 1)):
+            st.session_state.current_page -= 1
+            st.rerun()
+    with col_info:
+        st.markdown(
+            f"<div style='text-align: center'><b>Страница {current_page} из {total_pages}</b>"
+            f"<br><small>Дела: {page_size * (current_page - 1)}-{page_size * current_page if current_page < total_pages else total} (Всего: {total})</small></div>",
+            unsafe_allow_html=True
+        )
+    with col_next:
+        if st.button("Вперед", width="stretch", disabled=(current_page >= total_pages)):
+            st.session_state.current_page += 1
+            st.rerun()
 
 
 def page_search(repo: CaseRepository):
