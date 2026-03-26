@@ -1,0 +1,86 @@
+# Arbitr System Configuration
+# Main configuration file for filtering rules, thresholds, and mappings
+
+# Judge group mappings by region
+# Maps judge groups to legal areas they specialize in
+judge_groups:
+  moscow:
+    group1:
+      - "construction"
+      - "bankruptcy"
+    group2:
+      - "construction"
+
+  saint_petersburg:
+    group1:
+      - "construction"
+
+# Scoring thresholds for filtering stages
+thresholds:
+  # High relevance threshold - skip further analysis
+  high: 80
+
+  # Low relevance threshold - reject immediately
+  low: 20
+
+  # Gray zone range - requires LLM analysis
+  gray_min: 40
+  gray_max: 60
+
+# Linkage analysis rules
+linkage_rules:
+  # Minimum dispute count to consider pattern
+  dispute_count_threshold: 3
+
+  # Score boost per 0.1 mediation rate
+  mediation_rate_weight: 10
+
+  # Minimum cases for reliable aggregation
+  min_cases_for_analysis: 2
+
+# Scraping configuration
+scraping:
+  base_url: "https://kad.arbitr.ru"
+
+  # Delays between requests (seconds)
+  min_delay: 5
+  max_delay: 10
+
+  # Batch sizes
+  batch_size: 10
+  max_concurrent: 3
+
+  # Retry configuration
+  max_retries: 3
+  retry_delay: 15
+  timeout: 30
+
+  # Proxy configuration (rotating pool to avoid IP bans)
+  proxy:
+    enabled: false
+    host: "pool.proxys.io"
+    username: "user356709o11166r928780"
+    password: "vk5g2a"
+    port_range:
+      min: 10000
+      max: 10999
+
+  # API endpoints
+  endpoints:
+    judge_suggest: "/Suggest/Judges"
+    case_search: "/Kad/SearchInstances"
+
+  # User-Agent rotation
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+
+# Logging configuration
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+  # File rotation
+  max_bytes: 10485760 # 10MB
+  backup_count: 5

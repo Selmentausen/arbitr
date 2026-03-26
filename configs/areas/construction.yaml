@@ -1,0 +1,14 @@
+keywords_file: "dictionaries/construction/keywords.txt"
+
+party_combos:
+  - "юр.лицо vs юр.лицо"
+  - "ИП vs юр.лицо"
+  - "юр.лицо vs ИП"
+
+weight: 30
+
+mediation_signals:
+  - "мировое соглашение"
+  - "переговоры"
+  - "досудебное урегулирование"
+  - "медиация"
