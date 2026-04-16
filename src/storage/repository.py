@@ -26,6 +26,7 @@ from src.storage.database import (
     InstanceRecord,
     JudgeRecord,
     ParticipantRecord,
+    CaseParticipantLink,
     get_session,
 )
 from src.utils.logger import get_logger
@@ -33,14 +34,12 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _case_to_record(case: Case) -> CaseRecord:
+def _case_to_record(case: Case, session: Session) -> CaseRecord:
     """Convert a Pydantic Case to a SQLAlchemy CaseRecord."""
     record = CaseRecord(
         id=case.id,
         case_number=case.case_number,
         court=case.court,
-        plaintiff=case.plaintiff,
-        defendant=case.defendant,
         filing_date=case.filing_date,
         case_url=case.case_url,
         is_simple_justice=case.is_simple_justice,
@@ -59,28 +58,29 @@ def _case_to_record(case: Case) -> CaseRecord:
         record.judges.append(JudgeRecord(name=judge_name))
 
     # Participants
-    for role, participants in case.participants.items():
-        for p in participants:
-            record.participants.append(
-                ParticipantRecord(
-                    role=role,
-                    name=p.name,
-                    address=p.address,
-                    inn=p.inn,
-                    ogrn=p.ogrn,
+    record.participants = _build_participant_links(session, case.participants)
+
+    # Instances and their documents
+    for inst in case.instances:
+        instance_record = InstanceRecord(
+            court_name=inst.court_name,
+            instance_level=inst.instance_level,
+            case_number=inst.case_number,
+            incoming_number=inst.incoming_number,
+            date=inst.date,
+        )
+        record.instances.append(instance_record)
+        
+        for doc in getattr(inst, 'documents', []):
+            record.documents.append(
+                DocumentRecord(
+                    filename=doc.filename,
+                    url=doc.url,
+                    doc_type=doc.type,
+                    date=doc.date,
+                    instance=instance_record
                 )
             )
-
-    # Instances
-    for inst in case.instances:
-        record.instances.append(
-            InstanceRecord(
-                court_name=inst.court_name,
-                case_number=inst.case_number,
-                incoming_number=inst.incoming_number,
-                date=inst.date,
-            )
-        )
 
     return record
 
@@ -89,24 +89,46 @@ def _record_to_case(record: CaseRecord) -> Case:
     """Convert a SQLAlchemy CaseRecord back to a Pydantic Case."""
     # Build participants dict
     participants: Dict[str, List[CaseParticipant]] = {}
-    for p in record.participants:
-        role = p.role
-        if role not in participants:
-            participants[role] = []
-        participants[role].append(
-            CaseParticipant(name=p.name, address=p.address, inn=p.inn, ogrn=p.ogrn)
-        )
+    plaintiff_names = []
+    defendant_names = []
 
-    # Build instances
-    instances = [
-        CaseInstance(
-            court_name=inst.court_name,
-            case_number=inst.case_number,
-            incoming_number=inst.incoming_number,
-            date=inst.date,
+    for link in record.participants:
+        role = link.role
+        p = link.participant
+
+        if role not in participants:
+            participants[role] = [CaseParticipant(name=p.name, address=p.address, inn=p.inn, ogrn=p.ogrn)]
+        
+        if role == "plaintiff":
+            plaintiff_names.append(p.name)
+        elif role == "defendant":
+            defendant_names.append(p.name)
+
+
+    # Build instances with documents
+    instances = []
+    for inst in record.instances:
+        # Reconstruct documents that belong to this instance
+        inst_docs = [
+            CaseDocument(
+                filename=d.filename,
+                url=d.url,
+                type=d.doc_type,
+                date=d.date
+            )
+            for d in inst.documents
+        ]
+        
+        instances.append(
+            CaseInstance(
+                court_name=inst.court_name,
+                instance_level=inst.instance_level,
+                case_number=inst.case_number,
+                incoming_number=inst.incoming_number,
+                date=inst.date,
+                documents=inst_docs
+            )
         )
-        for inst in record.instances
-    ]
 
     # Build judges list
     judges = [j.name for j in record.judges]
@@ -115,8 +137,8 @@ def _record_to_case(record: CaseRecord) -> Case:
         id=record.id,
         case_number=record.case_number,
         court=record.court,
-        plaintiff=record.plaintiff,
-        defendant=record.defendant,
+        plaintiff=", ".join(plaintiff_names) if plaintiff_names else "",
+        defendant=", ".join(defendant_names) if defendant_names else "",
         filing_date=record.filing_date,
         case_url=record.case_url,
         is_simple_justice=record.is_simple_justice,
@@ -131,6 +153,27 @@ def _record_to_case(record: CaseRecord) -> Case:
         raw_html=record.raw_html,
         pdf_texts=json.loads(record.pdf_texts_json or "[]"),
     )
+
+
+def _build_participant_links(session: Session, participants_dict: dict) -> list[CaseParticipantLink]:
+    """
+    Helper function to deduploicate and build the association links for a CaseRecord.
+    """
+    links = []
+    for role, participants in participants_dict.items():
+        for p in participants:
+            participant_record = session.query(ParticipantRecord).filter(ParticipantRecord.name == p.name).first()
+            if not participant_record:
+                participant_record = ParticipantRecord(
+                    name=p.name,
+                    address=p.address,
+                    inn=p.inn,
+                    ogrn=p.ogrn
+                )
+                session.add(participant_record)
+                session.flush()
+            links.append(CaseParticipantLink(role=role, participant=participant_record))
+    return links
 
 
 class CaseRepository:
@@ -175,8 +218,6 @@ class CaseRepository:
             # Update existing record
             existing.case_number = case.case_number
             existing.court = case.court
-            existing.plaintiff = case.plaintiff
-            existing.defendant = case.defendant
             existing.filing_date = case.filing_date
             existing.case_url = case.case_url
             existing.is_simple_justice = case.is_simple_justice
@@ -196,29 +237,39 @@ class CaseRepository:
 
             # Update participants
             existing.participants.clear()
-            for role, participants in case.participants.items():
-                for p in participants:
-                    existing.participants.append(
-                        ParticipantRecord(role=role, name=p.name, address=p.address, inn=p.inn, ogrn=p.ogrn)
-                    )
+            existing.participants.extend(_build_participant_links(self.session, case.participants))
 
-            # Update instances
+            # Update instances and their documents
             existing.instances.clear()
+            existing.documents.clear()
+            
             for inst in case.instances:
-                existing.instances.append(
-                    InstanceRecord(
-                        court_name=inst.court_name,
-                        case_number=inst.case_number,
-                        incoming_number=inst.incoming_number,
-                        date=inst.date,
-                    )
+                instance_record = InstanceRecord(
+                    court_name=inst.court_name,
+                    instance_level=inst.instance_level,
+                    case_number=inst.case_number,
+                    incoming_number=inst.incoming_number,
+                    date=inst.date,
                 )
+                existing.instances.append(instance_record)
+                
+                # Append documents tied to this instance
+                # They are also appended to existing.documents so case_id resolves correctly
+                for doc in getattr(inst, 'documents', []):
+                    doc_record = DocumentRecord(
+                        filename=doc.filename,
+                        url=doc.url,
+                        doc_type=doc.type,
+                        date=doc.date,
+                        instance=instance_record
+                    )
+                    existing.documents.append(doc_record)
 
             self.session.commit()
             logger.debug(f"Updated case {case.id}")
             return existing
         else:
-            record = _case_to_record(case)
+            record = _case_to_record(case, self.session)
             self.session.add(record)
             self.session.commit()
             logger.debug(f"Saved new case {case.id}")
@@ -256,6 +307,12 @@ class CaseRepository:
             Saved CaseRecord
         """
         case = Case(**case_base.model_dump())
+        if case.plaintiff and case.plaintiff != "Unknown":
+            case.participants["plaintiff"] = [CaseParticipant(name=case.plaintiff)]
+        if case.defendant and case.defendant != "Unknown":
+            for def_name in case.defendant.split(", "):
+                if def_name.strip():
+                    case.participants.setdefault("defendant", []).append(CaseParticipant(name=def_name.strip()))
         return self.save_case(case)
 
     # --- Read ---
@@ -363,16 +420,17 @@ class CaseRepository:
         pattern = f"%{query}%"
         records = (
             self.session.query(CaseRecord)
+            .join(CaseRecord.participants)
+            .join(CaseParticipantLink.participant)
             .options(
-                joinedload(CaseRecord.participants),
+                joinedload(CaseRecord.participants).joinedload(CaseParticipantLink.participant),
                 joinedload(CaseRecord.documents),
                 joinedload(CaseRecord.instances),
                 joinedload(CaseRecord.judges),
             )
             .filter(
                 or_(
-                    CaseRecord.plaintiff.ilike(pattern),
-                    CaseRecord.defendant.ilike(pattern),
+                    ParticipantRecord.name.ilike(pattern),
                     CaseRecord.case_number.ilike(pattern),
                     CaseRecord.court.ilike(pattern),
                 )

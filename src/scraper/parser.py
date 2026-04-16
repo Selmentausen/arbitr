@@ -84,8 +84,14 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
         "extracted_data": {}
     }
 
-    for section in ["plaintiff", "defendant"]:
-        for li in soup.select(f".{section}s li"):
+    participant_classes = {
+        ".plaintiffs li": "plaintiff",
+        ".defendants li": "defendant",
+        ".third li": "third_party",
+        ".others li": "other_party"
+    }
+    for html_class, section in participant_classes.items():
+        for li in soup.select(html_class):
             name_elem = li.select_one('a')
             detail_elem =li.select_one('.js-rolloverHtml')
 
@@ -93,13 +99,31 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
                 name = name_elem.get_text(strip=True)
                 detail = detail_elem.get_text(strip=True) if detail_elem else None
                 #TODO actually parse the ogrn, inn and address from detail
-                result["participants"].setdefault(section, []).append(CaseParticipant(name=name, address=detail))
+                result["participants"].setdefault(section, []).append(CaseParticipant(name=name, address=detail, role=section))
+
+    dur_elem = soup.select_one('.b-case-overview .case-dur')
+    if dur_elem:
+        result["extracted_data"]["duration"] = dur_elem.get_text(strip=True)
+
+    date_elem = soup.select_one('.b-case-overview .case-date a')
+    if date_elem:
+        result["extracted_data"]["registration_date"] = date_elem.get_text(strip=True)
 
     for instance_block in soup.select('.js-chrono-item-header'):
         court_elem = instance_block.select_one('.instantion-name a')
         court_name = court_elem.get_text(strip=True) if court_elem else "Неизвестный суд"
-        level_elem = instance_block.select_one('.l-col-strong')
+        num_elem = instance_block.select_one('.b-case-instance-number')
+        case_num = num_elem.get_text(strip=True) if num_elem else None
+        
+        # Instance specific detailed properties
+        level_elem = instance_block.select_one('.l-col strong')
         instance_level = level_elem.get_text(strip=True) if level_elem else None
+
+        reg_date_elem = instance_block.select_one('.b-reg-date')
+        reg_date = reg_date_elem.get_text(strip=True) if reg_date_elem else None
+
+        inc_num_elem = instance_block.select_one('.b-reg-incoming_num')
+        inc_num = inc_num_elem.get_text(strip=True) if inc_num_elem else None
 
         docs = []
         doc_links = instance_block.select('a[href*="/PdfDocument/"], a[href*="/Document/"]',)
@@ -107,7 +131,7 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
         for link in doc_links:
             url = link.get('href')
             case_result_text = link.get_text(strip=True)
-            filename = url.split('/')[-1] if '/' in url else "document.pdf"
+            filename = case_result_text if case_result_text else (url.split('/')[-1] if '/' in url else "document.pdf")
 
             doc = CaseDocument(
                 filename=filename,
@@ -119,8 +143,17 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
             if case_result_text:
                 result["extracted_data"].setdefault(court_name, {})["result"] = case_result_text
         
-        if docs:
-            instance = CaseInstance(court_name=court_name, documents=docs)
+        if docs or case_num:
+            instance = CaseInstance(
+                court_name=court_name, 
+                case_number=case_num, 
+                instance_level=instance_level,
+                date=reg_date,
+                incoming_number=inc_num,
+                documents=docs
+            )
+            # Map instance type strictly into a property of the instance maybe but 
+            # currently we don't have level property on CaseInstance, so we map into documents type
             result["instances"].append(instance)
 
     return result
@@ -165,19 +198,17 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
     judges = []
     
     if court_td:
-        # Court name (usually second div)
-        court_divs = court_td.find_all('div', recursive=False)
-        for div in court_divs:
-            if 'judge' not in div.get('class', []):
-                court_name = div.get('title') or div.get_text(strip=True)
-                break
-        
-        # Judge name
+        # First isolate the judge name so it doesn't bleed into the court text
         judge_div = court_td.find('div', class_='judge')
         if judge_div:
             judge_name = judge_div.get('title') or judge_div.get_text(strip=True)
             if judge_name:
                 judges.append(judge_name)
+            # Remove the judge element completely from the HTML tree
+            judge_div.decompose()
+            
+        # The remaining text inside court_td defines the court
+        court_name = court_td.get('title') or court_td.get_text(separator=" ", strip=True)
     
     # Extract plaintiff
     plaintiff_td = row.find('td', class_='plaintiff')

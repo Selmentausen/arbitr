@@ -11,7 +11,7 @@ configured area keywords and judge group mappings to assign:
 import re
 from typing import Dict, List, Optional, Any
 
-from src.models.case import Case, CaseBase, StatusEnum
+from src.models.case import Case, CaseBase, CaseParticipant, StatusEnum
 from src.config.manager import ConfigManager
 from src.utils.logger import get_logger
 
@@ -37,6 +37,15 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
         full_case = case
     else:
         full_case = Case(**case.model_dump())
+        
+        # Seed the participants dictionary for the database schema
+        if full_case.plaintiff and full_case.plaintiff != "Unknown":
+            full_case.participants["plaintiff"] = [CaseParticipant(name=full_case.plaintiff)]
+            
+        if full_case.defendant and full_case.defendant != "Unknown":
+            for def_name in full_case.defendant.split(", "):
+                if def_name.strip():
+                    full_case.participants.setdefault("defendant", []).append(CaseParticipant(name=def_name.strip()))
 
     score = 0.0
     matched_area = None
@@ -112,14 +121,20 @@ def _score_case_for_area(case: Case, area_rules: Dict[str, Any]) -> float:
     searchable_text = " ".join([
         case.plaintiff.lower(),
         case.defendant.lower(),
-        case.court.lower(),
     ]).lower()
 
     # Keyword matching
     keyword_matches = 0
     for keyword in keywords:
-        if keyword.lower() in searchable_text:
-            keyword_matches += 1
+        kw = keyword.lower()
+        if len(kw) <= 3:
+            # For short acronyms (like "СК", "СМУ"), require word boundaries to avoid matching inside long words
+            pattern = rf'(?:^|[\s"\'«»()\-,.]){re.escape(kw)}(?:[\s"\'«»()\-,.]|$)'
+            if re.search(pattern, searchable_text):
+                keyword_matches += 1
+        else:
+            if kw in searchable_text:
+                keyword_matches += 1
 
     if keyword_matches > 0:
         # Base score from keyword weight

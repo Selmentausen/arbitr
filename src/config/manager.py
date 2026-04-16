@@ -166,8 +166,11 @@ class ConfigManager:
                 with open(area_file, "r", encoding="utf-8") as f:
                     area_config = yaml.safe_load(f) or {}
                 if "keywords_file" in area_config:
-                    dict_path = config_dir / area_config["keywords_file"]
+                    dict_path = self.config_path.parent / area_config["keywords_file"]
                     area_config["keywords"] = self._read_dictionary_file(dict_path)
+                if "stage2_keywords_file" in area_config:
+                    dict_path = self.config_path.parent / area_config["stage2_keywords_file"]
+                    area_config["stage2_keywords"] = self._read_dictionary_file(dict_path)
                 self._config["areas"][area_name] = area_config
             except Exception as e:
                 logger.error(f"Error loading area config {area_file}: {e}")
@@ -175,7 +178,7 @@ class ConfigManager:
     def _read_dictionary_file(self, file_path: Path) -> list[str]:
         """Read a dictionary text file into a list of strings."""
         if not file_path.exists():
-            logger.warning(f"Dictionary file not found: {path}")
+            logger.warning(f"Dictionary file not found: {file_path}")
             return []
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read().strip()

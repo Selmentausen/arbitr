@@ -8,6 +8,7 @@ Tables:
 - instances: Court instances (chronology)
 """
 
+from enum import unique, Enum
 from datetime import datetime
 from typing import Optional
 
@@ -38,8 +39,6 @@ class CaseRecord(Base):
     id = Column(String, primary_key=True)
     case_number = Column(String, nullable=False, index=True)
     court = Column(String, nullable=False)
-    plaintiff = Column(String, nullable=False)
-    defendant = Column(String, nullable=False)
     filing_date = Column(DateTime, nullable=True)
     case_url = Column(String, nullable=True)
     is_simple_justice = Column(Boolean, default=False)
@@ -72,7 +71,7 @@ class CaseRecord(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    participants = relationship("ParticipantRecord", back_populates="case", cascade="all, delete-orphan")
+    participants = relationship("CaseParticipantLink", back_populates="case", cascade="all, delete-orphan")
     documents = relationship("DocumentRecord", back_populates="case", cascade="all, delete-orphan")
     instances = relationship("InstanceRecord", back_populates="case", cascade="all, delete-orphan")
     judges = relationship("JudgeRecord", back_populates="case", cascade="all, delete-orphan")
@@ -86,17 +85,26 @@ class ParticipantRecord(Base):
     __tablename__ = "participants"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    role = Column(String, nullable=False)  # 'plaintiff', 'defendant', 'third_party', 'other'
-    name = Column(String, nullable=False)
+    name = Column(String, nullable=False, unique=True)
     address = Column(Text, nullable=True)
     inn = Column(String, nullable=True)
     ogrn = Column(String, nullable=True)
 
-    case = relationship("CaseRecord", back_populates="participants")
+    cases = relationship("CaseParticipantLink", back_populates="participant", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<ParticipantRecord(name={self.name}, role={self.role})>"
+        return f"<ParticipantRecord(name={self.name})>"
+
+
+class CaseParticipantLink(Base):
+    __tablename__ = "case_participants"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    participant_id = Column(Integer, ForeignKey("participants.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String, nullable=False) # 'plaintiff', 'defendant', 'third_party', 'other_party'
+
+    case = relationship("CaseRecord", back_populates="participants")
+    participant = relationship("ParticipantRecord", back_populates="cases")
 
 
 class DocumentRecord(Base):
@@ -105,6 +113,7 @@ class DocumentRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    instance_id = Column(Integer, ForeignKey("instances.id", ondelete="CASCADE"), nullable=True, index=True)
     doc_id = Column(String, nullable=True)  # ID from kad.arbitr.ru
     filename = Column(String, nullable=True)
     url = Column(String, nullable=True)
@@ -114,6 +123,7 @@ class DocumentRecord(Base):
     extracted_text = Column(Text, nullable=True)  # Extracted PDF text
 
     case = relationship("CaseRecord", back_populates="documents")
+    instance = relationship("InstanceRecord", back_populates="documents")
 
     def __repr__(self):
         return f"<DocumentRecord(filename={self.filename}, type={self.doc_type})>"
@@ -126,11 +136,13 @@ class InstanceRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     court_name = Column(String, nullable=False)
+    instance_level = Column(String, nullable=True)
     case_number = Column(String, nullable=True)
     incoming_number = Column(String, nullable=True)
     date = Column(String, nullable=True)
 
     case = relationship("CaseRecord", back_populates="instances")
+    documents = relationship("DocumentRecord", back_populates="instance", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<InstanceRecord(court={self.court_name})>"

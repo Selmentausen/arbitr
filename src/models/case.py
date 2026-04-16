@@ -51,6 +51,7 @@ class CaseParticipant(BaseModel):
     address: Optional[str] = None
     inn: Optional[str] = None
     ogrn: Optional[str] = None
+    role: Optional[str] = None
     
 class CaseDocument(BaseModel):
     id: Optional[str] = None
@@ -62,6 +63,7 @@ class CaseDocument(BaseModel):
 class CaseInstance(BaseModel):
     court_name: str
     case_number: Optional[str] = None
+    instance_level: Optional[str] = None
     incoming_number: Optional[str] = None
     date: Optional[str] = None
     documents: List[CaseDocument] = Field(default_factory=list)

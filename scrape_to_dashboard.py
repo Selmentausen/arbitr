@@ -26,6 +26,7 @@ from src.scraper.parser import parse_case_list
 from src.filters.pipeline import FilterPipeline
 from src.storage.database import init_db
 from src.storage.repository import CaseRepository
+from src.models.case import StatusEnum
 from src.utils.logger import setup_logging, get_logger
 
 DB_PATH = str(Path("data/arbitr.db").absolute())
@@ -70,51 +71,78 @@ async def scrape_and_store(
     
     scraper = PlaywrightScraper(config, headless=headless)
     
-    try:
-        cases = await scraper.collect_cases(court_name=court, judge_name=judge_name, max_cases=max_cases)
-    except Exception as e:
-        print(f"\n❌ Scraping failed: {e}")
-        print("\nPossible causes:")
-        print("  - DDOS-Guard blocked the request (try with headless=False)")
-        print("  - Network issue (check internet connection)")
-        print("  - Site structure changed (parser may need updates)")
-        import traceback
-        traceback.print_exc()
-        return
-    
-    if not cases:
-        print("\n⚠️  No cases were scraped. Possible reasons:")
-        print("  - DDOS-Guard challenge page was shown")
-        print("  - Judge name not found")
-        print("  - HTML structure changed")
-        print("\nCheck debug_page_1.html for the raw HTML that was received.")
-        return
-    
-    print(f"  ✅ Scraped {len(cases)} cases")
-    
-    # Save raw results to JSON as backup
-    raw_output = Path("data/raw_cases.json")
-    raw_output.parent.mkdir(parents=True, exist_ok=True)
-    with open(raw_output, "w", encoding="utf-8") as f:
-        data = [c.model_dump(mode="json") for c in cases]
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    print(f"  💾 Raw data saved to {raw_output}")
-    
-    # --- Step 2: Filter ---
-    print("\n🔍 Step 2: Running filter pipeline...")
-    
-    pipeline = FilterPipeline(config)
-    processed_cases = pipeline.process_batch(cases)
-    
-    # Print summary
-    status_counts = {}
-    for c in processed_cases:
-        s = c.status.value
-        status_counts[s] = status_counts.get(s, 0) + 1
-    
-    print("  Filter results:")
-    for status, count in sorted(status_counts.items()):
-        print(f"    {status}: {count}")
+    async with scraper:
+        try:
+            cases = await scraper.collect_cases(court_name=court, judge_name=judge_name, max_cases=max_cases)
+        except Exception as e:
+            print(f"\n❌ Scraping failed: {e}")
+            print("\nPossible causes:")
+            print("  - DDOS-Guard blocked the request (try with headless=False)")
+            print("  - Network issue (check internet connection)")
+            print("  - Site structure changed (parser may need updates)")
+            import traceback
+            traceback.print_exc()
+            return
+        
+        if not cases:
+            print("\n⚠️  No cases were scraped. Possible reasons:")
+            print("  - DDOS-Guard challenge page was shown")
+            print("  - Judge name not found")
+            print("  - HTML structure changed")
+            print("\nCheck debug_page_1.html for the raw HTML that was received.")
+            return
+        
+        print(f"  ✅ Scraped {len(cases)} cases")
+        
+        # Save raw results to JSON as backup
+        raw_output = Path("data/raw_cases.json")
+        raw_output.parent.mkdir(parents=True, exist_ok=True)
+        with open(raw_output, "w", encoding="utf-8") as f:
+            data = [c.model_dump(mode="json") for c in cases]
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        print(f"  💾 Raw data saved to {raw_output}")
+        
+        # --- Step 2: Filter ---
+        print("\n🔍 Step 2: Running filter pipeline...")
+        
+        pipeline = FilterPipeline(config)
+        processed_cases = pipeline.process_batch(cases)
+        
+        # Print summary
+        status_counts = {}
+        for c in processed_cases:
+            s = c.status.value
+            status_counts[s] = status_counts.get(s, 0) + 1
+        
+        print("  Filter results:")
+        for status, count in sorted(status_counts.items()):
+            print(f"    {status}: {count}")
+            
+        # --- Step 2b: Stage 2 Enrichment ---
+        uncertain_cases = [
+            c for c in processed_cases 
+            if c.status in (StatusEnum.UNCERTAIN, StatusEnum.INSUFFICIENT_INFO)
+        ]
+        
+        if uncertain_cases:
+            print(f"\n🌐 Step 2b: Enriching {len(uncertain_cases)} uncertain cases (Stage 2)...")
+            # Perform batched page navigation to extract full participant and instance history
+            try:
+                await scraper.batch_enrich_cases(uncertain_cases, batch_size=10, judge_name=judge_name, court_name=court)
+                # Re-run them through the pipeline's stage 2 filter
+                uncertain_cases = pipeline.process_stage2_batch(uncertain_cases)
+                
+                # Recalculate status counts for final reporting
+                status_counts = {}
+                for c in processed_cases:
+                    s = c.status.value
+                    status_counts[s] = status_counts.get(s, 0) + 1
+                    
+                print("  Final Stage 2 Filter results:")
+                for status, count in sorted(status_counts.items()):
+                    print(f"    {status}: {count}")
+            except Exception as e:
+                print(f"⚠️ Stage 2 enrichment failed: {e}")
     
     # --- Step 3: Store ---
     print("\n💾 Step 3: Storing in database...")

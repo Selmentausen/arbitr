@@ -297,6 +297,8 @@ def _render_case_detail(repo: CaseRepository, case):
         st.markdown(f"**Категория:** {case.category or '—'}")
         st.markdown(f"**Балл:** {case.relevance_score:.1f}")
         st.markdown(f"**Статус:** {STATUS_LABELS.get(case.status.value, case.status.value)}")
+        if case.extracted_data and case.extracted_data.get("duration"):
+            st.markdown(f"**Длительность:** {case.extracted_data.get('duration')}")
 
     # Judges
     if case.judges:
@@ -307,7 +309,7 @@ def _render_case_detail(repo: CaseRepository, case):
         st.markdown("---")
         st.markdown("**Участники:**")
         for role, participants in case.participants.items():
-            role_label = {"plaintiffs": "Истцы", "defendants": "Ответчики", "third_parties": "Третьи лица", "others": "Другие"}.get(role, role)
+            role_label = {"plaintiff": "Истцы", "defendant": "Ответчики", "third_party": "Третьи лица", "other_party": "Иные лица"}.get(role, role)
             names = ", ".join([p.name for p in participants])
             st.markdown(f"- **{role_label}:** {names}")
 
@@ -316,12 +318,35 @@ def _render_case_detail(repo: CaseRepository, case):
         st.markdown("---")
         st.markdown("**Инстанции:**")
         for inst in case.instances:
-            inst_line = f"- {inst.court_name}"
-            if inst.case_number:
-                inst_line += f" ({inst.case_number})"
+            # Build expanding card title
+            title_parts = [inst.court_name]
+            if getattr(inst, 'instance_level', None):
+                title_parts.append(f"({inst.instance_level})")
             if inst.date:
-                inst_line += f" — {inst.date}"
-            st.markdown(inst_line)
+                title_parts.append(f"— {inst.date}")
+            title = " ".join(title_parts)
+            
+            with st.expander(title):
+                st.markdown(f"**Суд:** {inst.court_name}")
+                
+                if getattr(inst, 'instance_level', None):
+                    st.markdown(f"**Инстанция:** {inst.instance_level}")
+                    
+                if inst.case_number:
+                    st.markdown(f"**Номер дела:** {inst.case_number}")
+                    
+                if inst.incoming_number:
+                    st.markdown(f"**Входящий номер:** {inst.incoming_number}")
+                    
+                if inst.date:
+                    st.markdown(f"**Дата:** {inst.date}")
+                
+                # Print documents natively inside the card
+                if getattr(inst, 'documents', []):
+                    st.markdown("**📄 Документы:**")
+                    for doc in inst.documents:
+                        full_url = doc.url if doc.url and doc.url.startswith("http") else f"https://kad.arbitr.ru{doc.url}"
+                        st.markdown(f"- [{doc.filename}]({full_url})")
 
     # Extracted data
     if case.extracted_data:

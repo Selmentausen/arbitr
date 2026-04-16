@@ -1,4 +1,5 @@
 keywords_file: "dictionaries/construction/keywords.txt"
+stage2_keywords_file: "dictionaries/construction/stage2.txt"
 
 party_combos:
   - "юр.лицо vs юр.лицо"

@@ -45,8 +45,8 @@ class PlaywrightScraper:
         self.config = config
         self.headless = headless
         self.base_url = config.get("scraping.base_url", "https://kad.arbitr.ru")
-        self.min_delay = config.get("scraping.min_delay", 5)
-        self.max_delay = config.get("scraping.max_delay", 10)
+        self.min_delay = config.get("scraping.min_delay", 3)
+        self.max_delay = config.get("scraping.max_delay", 5)
         
         # Proxy configuration
         self.proxy_enabled = config.get("scraping.proxy.enabled", False)
@@ -69,6 +69,20 @@ class PlaywrightScraper:
             self.proxy_password = proxy_pass
             
             logger.info(f"Playwright proxy enabled: {proxy_host}:{proxy_port}")
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        self.playwright_engine = await async_playwright().start()
+        self.browser, self.context, self.page = await self._setup_browser(self.playwright_engine)
+        self.is_warmed_up = False
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        if hasattr(self, 'browser') and self.browser:
+            await self.browser.close()
+        if hasattr(self, 'playwright_engine') and self.playwright_engine:
+            await self.playwright_engine.stop()
 
     async def _setup_browser(self, p) -> Tuple[BrowserContext, Page]:
         """Configure and launch browser with stealth settings."""
@@ -314,70 +328,134 @@ class PlaywrightScraper:
         judge_id = await self.get_judge_id(judge_name)
         court_id = COURT_MAP.get(court_name) if court_name else None
         
-        async with async_playwright() as p:
-            browser, context, page = await self._setup_browser(p)
+        all_cases = []
+        try:
+            # 1. Initialize Session via UI if not warmed up
+            if not getattr(self, 'is_warmed_up', False):
+                await self._init_session(self.page, court_name, judge_name)
+                self.is_warmed_up = True
             
-            all_cases = []
-            try:
-                # 1. Initialize Session via UI
-                await self._init_session(page, court_name, judge_name)
+            html_result = await self.page.content()
+            
+            # Debug: Save Page 1 HTML
+            # with open("debug_page_1.html", "w", encoding="utf-8") as f:
+                # f.write(html_result)
+            # logger.info("Saved Page 1 HTML to debug_page_1.html")
+            
+            # Parse Page 1
+            cases, pagination = parse_case_list(html_result)
+            logger.info(f"Parsed {len(cases)} cases from Page 1")
+            all_cases.extend(cases)
+            
+            # 2. Pagination Loop (Page 2+)
+            current_page = 2
+            while len(all_cases) < max_cases:
+                if len(cases) == 0: # Stop if previous page was empty
+                    break
+                    
+                # Random delay
+                delay = random.uniform(self.min_delay, self.max_delay)
+                logger.info(f"Waiting {delay:.1f}s before Page {current_page}...")
+                await asyncio.sleep(delay)
                 
-                html_result = await page.content()
+                # Fetch next page
+                html_result = await self.fetch_api_page(self.page, court_id, judge_id, current_page, 25)
                 
-                # Debug: Save Page 1 HTML
-                # with open("debug_page_1.html", "w", encoding="utf-8") as f:
-                    # f.write(html_result)
-                # logger.info("Saved Page 1 HTML to debug_page_1.html")
-                
-                
-
-                # Parse Page 1
-                cases, pagination = parse_case_list(html_result)
-                logger.info(f"Parsed {len(cases)} cases from Page 1")
+                if not html_result:
+                    logger.warning(f"Failed to fetch page {current_page}")
+                    break
+                    
+                # Debug: Save API Page HTML
+                # with open(f"debug_page_{current_page}.html", "w", encoding="utf-8") as f:
+                #     f.write(html_result)
+                    
+                cases, _ = parse_case_list(html_result)
+                if not cases:
+                    logger.info(f"No more cases found on page {current_page}")
+                    break
+                    
+                logger.info(f"Parsed {len(cases)} cases from Page {current_page}")
                 all_cases.extend(cases)
                 
-                # 2. Pagination Loop (Page 2+)
-                current_page = 2
-                while len(all_cases) < max_cases:
-                    if len(cases) == 0: # Stop if previous page was empty
-                        break
-                        
-                    # Random delay
-                    delay = random.uniform(self.min_delay, self.max_delay)
-                    logger.info(f"Waiting {delay:.1f}s before Page {current_page}...")
-                    await asyncio.sleep(delay)
-                    
-                    # Fetch next page
-                    html_result = await self.fetch_api_page(page, court_id, judge_id, current_page, 25)
-                    
-                    if not html_result:
-                        logger.warning(f"Failed to fetch page {current_page}")
-                        break
-                        
-                    # Debug: Save API Page HTML
-                    # with open(f"debug_page_{current_page}.html", "w", encoding="utf-8") as f:
-                    #     f.write(html_result)
-                        
-                    cases, _ = parse_case_list(html_result)
-                    if not cases:
-                        logger.info(f"No more cases found on page {current_page}")
-                        break
-                        
-                    logger.info(f"Parsed {len(cases)} cases from Page {current_page}")
-                    all_cases.extend(cases)
-                    
-                    current_page += 1
-                    
-                # Trim to max_cases
-                return all_cases[:max_cases]
+                current_page += 1
                 
-            except Exception as e:
-                logger.error(f"Collection failed: {e}")
-                import traceback
-                traceback.print_exc()
-                return all_cases
-            finally:
-                await browser.close()
+            # Trim to max_cases
+            return all_cases[:max_cases]
+                
+        except Exception as e:
+            logger.error(f"Collection failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return all_cases
+
+    async def batch_enrich_cases(self, cases: List[CaseBase], batch_size: int = 10, judge_name: str = None, court_name: str = "АС Московского округа") -> None:
+        """
+        Enrich a batch of cases by fetching and parsing their full case cards.
+        Uses a single browser session to minimize overhead and avoid blocks.
+        Updates the Case objects in place.
+        """
+        if not cases:
+            return
+            
+        # Get just the cases that actually need enrichment and have URLs
+        valid_cases = [c for c in cases if getattr(c, 'case_url', None)]
+        if not valid_cases:
+            logger.info("No cases with URLs to enrich.")
+            return
+
+        logger.info(f"Starting batch enrichment for {len(valid_cases)} cases (batch_size={batch_size})")
+        
+        try:
+            # Initialize session once to clear DDOS-Guard
+            if not getattr(self, 'is_warmed_up', False):
+                await self._init_session(self.page, court_name, judge_name)
+                self.is_warmed_up = True
+            
+            from src.scraper.parser import parse_case_card
+                
+            for i in range(0, len(valid_cases), batch_size):
+                batch = valid_cases[i:i + batch_size]
+                logger.info(f"Processing enrichment batch {i//batch_size + 1} ({len(batch)} cases)")
+                
+                for case in batch:
+                    logger.info(f"Fetching case card: {case.case_url}")
+                    try:
+                        # Delay to mirror human pacing
+                        delay = random.uniform(self.min_delay, self.max_delay)
+                        await asyncio.sleep(delay)
+                        
+                        await self.page.goto(case.case_url, wait_until="domcontentloaded", timeout=60000)
+                        try:
+                            await self.page.wait_for_load_state("networkidle", timeout=10000)
+                        except:
+                            pass
+                            
+                        html_content = await self.page.content()
+                        
+                        # Parse detailed card
+                        card_data = parse_case_card(html_content)
+                        
+                        # Update case object in-place (Case model inherits CaseBase)
+                        if hasattr(case, 'raw_html'):
+                            case.raw_html = html_content
+                        
+                        if hasattr(case, 'instances'):
+                            case.instances = card_data.get("instances", [])
+                            
+                        if hasattr(case, 'extracted_data'):
+                            case.extracted_data.update(card_data.get("extracted_data", {}))
+                        
+                        if hasattr(case, 'participants') and card_data.get("participants"):
+                            # This overrides Stage 1 participants with fully detailed ones from Stage 2
+                            case.participants = card_data["participants"]
+                            
+                        logger.debug(f"Successfully enriched {case.case_number}")
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to enrich case {case.case_number}: {e}")
+                            
+        except Exception as e:
+            logger.error(f"Batch enrichment failed: {e}")
 
 
 async def main_playwright():

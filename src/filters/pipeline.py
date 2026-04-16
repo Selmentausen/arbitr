@@ -118,3 +118,42 @@ class FilterPipeline:
             logger.info(f"  {status}: {count}")
 
         return results
+
+    def process_stage2_batch(self, cases: List[Case]) -> List[Case]:
+        """
+        Process Stage 2 keyword matching on a batch of enriched cases.
+        
+        Args:
+            cases: List of Case objects that have had Stage 2 HTML loaded
+            
+        Returns:
+            List of updated Case objects
+        """
+        if not cases:
+            return []
+            
+        logger.info(f"Processing Stage 2 filter batch of {len(cases)} cases...")
+        from src.filters.stage2_screen import stage2_html_analyze
+        
+        results = []
+        for case in cases:
+            try:
+                result = stage2_html_analyze(case, self.config)
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Failed to process Stage 2 for case {case.case_number}: {e}")
+                case.status = StatusEnum.INSUFFICIENT_INFO
+                case.extracted_data["error_stage2"] = str(e)
+                results.append(case)
+                
+        # Log summary
+        status_counts = {}
+        for r in results:
+            status = r.status.value
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        logger.info(f"Stage 2 Batch complete: {len(results)} cases evaluated")
+        for status, count in status_counts.items():
+            logger.info(f"  {status}: {count}")
+
+        return results
