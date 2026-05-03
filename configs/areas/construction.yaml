@@ -1,15 +1,22 @@
+allowed_case_types:
+  - "civil"
+
+reject_keywrods_file: "dictionaries/construction/reject_keywrods.txt"
+
 keywords_file: "dictionaries/construction/keywords.txt"
-stage2_keywords_file: "dictionaries/construction/stage2.txt"
+company_match_weight: 20
 
 party_combos:
   - "юр.лицо vs юр.лицо"
   - "ИП vs юр.лицо"
   - "юр.лицо vs ИП"
 
-weight: 30
+stage2_keywords_file: "dictionaries/construction/stage2.txt"
+stage2_weight: 40
 
 mediation_signals:
   - "мировое соглашение"
   - "переговоры"
   - "досудебное урегулирование"
   - "медиация"
+mediation_weight: 15

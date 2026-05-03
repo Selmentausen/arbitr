@@ -4,11 +4,13 @@ SQLAlchemy database models and connection setup for SQLite storage.
 Tables:
 - cases: Main case data (mirrors Case pydantic model)
 - participants: Case participants (plaintiffs, defendants, third parties)
+- case_participants: Association table linking cases to participants
 - documents: Case documents (PDFs, etc.)
-- instances: Court instances (chronology)
+- instances: Court instances (chronology headers)
+- instance_updates: Individual chronology entries within instances
+- judges: Judges associated with cases
 """
 
-from enum import unique, Enum
 from datetime import datetime
 from typing import Optional
 
@@ -41,7 +43,14 @@ class CaseRecord(Base):
     court = Column(String, nullable=False)
     filing_date = Column(DateTime, nullable=True)
     case_url = Column(String, nullable=True)
+    case_type = Column(String, nullable=True, index=True)
+    current_instance = Column(String, nullable=True)
     is_simple_justice = Column(Boolean, default=False)
+
+    # Case page metadata
+    case_status_text = Column(String, nullable=True)
+    case_category_text = Column(String, nullable=True)
+    claim_amount = Column(Float, nullable=True)
 
     # Filtering / scoring
     category = Column(String, nullable=True, index=True)
@@ -60,6 +69,7 @@ class CaseRecord(Base):
     case_page_scraped = Column(Boolean, default=False)
     documents_scraped = Column(Boolean, default=False)
     scraped_at = Column(DateTime, nullable=True)
+    last_scraped_at = Column(DateTime, nullable=True)
 
     # Review state
     reviewed = Column(Boolean, default=False, index=True)
@@ -87,21 +97,24 @@ class ParticipantRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False, unique=True)
     address = Column(Text, nullable=True)
-    inn = Column(String, nullable=True)
+    inn = Column(String, nullable=True, index=True)
     ogrn = Column(String, nullable=True)
+    postal_code = Column(String, nullable=True)
 
     cases = relationship("CaseParticipantLink", back_populates="participant", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<ParticipantRecord(name={self.name})>"
+        return f"<ParticipantRecord(name={self.name}, inn={self.inn})>"
 
 
 class CaseParticipantLink(Base):
+    """Association table linking cases to participants with role."""
     __tablename__ = "case_participants"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     participant_id = Column(Integer, ForeignKey("participants.id", ondelete="CASCADE"), nullable=False, index=True)
-    role = Column(String, nullable=False) # 'plaintiff', 'defendant', 'third_party', 'other_party'
+    role = Column(String, nullable=False)  # 'plaintiff', 'defendant', 'third_party', 'other_party'
 
     case = relationship("CaseRecord", back_populates="participants")
     participant = relationship("ParticipantRecord", back_populates="cases")
@@ -114,23 +127,25 @@ class DocumentRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     instance_id = Column(Integer, ForeignKey("instances.id", ondelete="CASCADE"), nullable=True, index=True)
-    doc_id = Column(String, nullable=True)  # ID from kad.arbitr.ru
+    doc_id = Column(String, nullable=True)
     filename = Column(String, nullable=True)
     url = Column(String, nullable=True)
     date = Column(String, nullable=True)
     doc_type = Column(String, nullable=True)
-    local_path = Column(String, nullable=True)  # Path to downloaded file
-    extracted_text = Column(Text, nullable=True)  # Extracted PDF text
+    priority = Column(String, nullable=True)          # high/medium/low/uncategorized
+    publish_date = Column(String, nullable=True)
+    local_path = Column(String, nullable=True)
+    extracted_text = Column(Text, nullable=True)
 
     case = relationship("CaseRecord", back_populates="documents")
     instance = relationship("InstanceRecord", back_populates="documents")
 
     def __repr__(self):
-        return f"<DocumentRecord(filename={self.filename}, type={self.doc_type})>"
+        return f"<DocumentRecord(filename={self.filename}, priority={self.priority})>"
 
 
 class InstanceRecord(Base):
-    """Court instance record (from chronology)."""
+    """Court instance record (from chronology header)."""
     __tablename__ = "instances"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -140,12 +155,37 @@ class InstanceRecord(Base):
     case_number = Column(String, nullable=True)
     incoming_number = Column(String, nullable=True)
     date = Column(String, nullable=True)
+    result_text = Column(Text, nullable=True)
+    result_pdf_url = Column(String, nullable=True)
 
     case = relationship("CaseRecord", back_populates="instances")
     documents = relationship("DocumentRecord", back_populates="instance", cascade="all, delete-orphan")
+    updates = relationship("InstanceUpdateRecord", back_populates="instance", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<InstanceRecord(court={self.court_name})>"
+        return f"<InstanceRecord(court={self.court_name}, level={self.instance_level})>"
+
+
+class InstanceUpdateRecord(Base):
+    """Single chronology entry within a court instance."""
+    __tablename__ = "instance_updates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    instance_id = Column(Integer, ForeignKey("instances.id", ondelete="CASCADE"), nullable=False, index=True)
+    date = Column(String, nullable=True)
+    update_type = Column(String, nullable=True)        # "Определение", "Письмо", "Жалоба"
+    subject = Column(String, nullable=True)            # Who filed / judge name
+    content = Column(Text, nullable=True)              # Result text
+    pdf_url = Column(String, nullable=True)
+    pdf_publish_date = Column(String, nullable=True)
+    additional_info = Column(Text, nullable=True)      # Barcode, claim amount, etc.
+    judge_panel = Column(String, nullable=True)
+    reporting_judge = Column(String, nullable=True)
+
+    instance = relationship("InstanceRecord", back_populates="updates")
+
+    def __repr__(self):
+        return f"<InstanceUpdateRecord(date={self.date}, type={self.update_type})>"
 
 
 class JudgeRecord(Base):

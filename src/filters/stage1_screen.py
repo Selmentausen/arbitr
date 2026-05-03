@@ -47,44 +47,58 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
                 if def_name.strip():
                     full_case.participants.setdefault("defendant", []).append(CaseParticipant(name=def_name.strip()))
 
-    score = 0.0
-    matched_area = None
-    match_details = {}
-
     # Get all configured areas
     areas = config.get("areas", {})
     thresholds = config.get_thresholds()
+    global_reject_keywords = config.get("global_reject_keywords", [])
 
-    best_area_score = 0.0
+    # Pre filter: Case Type
+    case_type_result = _pre_filter_case_type(full_case, areas)
+    if case_type_result == "reject":
+        full_case.status = StatusEnum.REJECT
+        full_case.extracted_data["reject_reason"] = f"case_type '{full_case.case_type}' not in allowed types"
+        return full_case
+    elif case_type_result == "unknown":
+        full_case.status = StatusEnum.INSUFFICIENT_INFO
+        full_case.extracted_data["reject_reason"] = "case_type unknown from search results"
+
+    reject_match = _pre_filter_reject_keywords(full_case, global_reject_keywords, areas)
+    if reject_match:
+        full_case.status = StatusEnum.REJECT
+        full_case.relevance_score = 0.0
+        full_case.extracted_data["reject_reason"] = f"reject keyword matched: '{reject_match}'"
+        return full_case
+
+    score = 0.0
     best_area_name = None
+    best_area_score = 0.0
 
     for area_name, area_rules in areas.items():
-        area_score = _score_case_for_area(full_case, area_rules)
+        area_score = _score_company_name_match(full_case, area_rules)
         if area_score > best_area_score:
             best_area_score = area_score
             best_area_name = area_name
 
     score = best_area_score
-    matched_area = best_area_name
 
     # Apply judge group bonus
     judge_bonus = _check_judge_groups(full_case, config)
     if judge_bonus > 0:
         score += judge_bonus
-        match_details["judge_group_bonus"] = judge_bonus
+        full_case.extracted_data["judge_group_bonus"] = judge_bonus
 
     # Cap score at 100
     score = min(score, 100.0)
 
     # Assign results
     full_case.relevance_score = score
-    full_case.category = matched_area
+    full_case.category = best_area_name
 
     # Determine status based on thresholds
     high_threshold = thresholds.get("high", 80)
     low_threshold = thresholds.get("low", 20)
 
-    if matched_area is None and score == 0.0:
+    if best_area_name is None and score == 0.0:
         # No keywords matched any area — insufficient data to judge
         full_case.status = StatusEnum.INSUFFICIENT_INFO
     elif score >= high_threshold:
@@ -95,59 +109,84 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
         full_case.status = StatusEnum.UNCERTAIN
 
     # Store match details in extracted_data
-    full_case.extracted_data["stage1_details"] = match_details
     full_case.extracted_data["stage1_score"] = score
 
     logger.debug(
         f"Stage 1: case={full_case.case_number}, "
-        f"area={matched_area}, score={score:.1f}, status={full_case.status.value}"
+        f"area={matched_area}, "
+        f"score={score:.1f}, status={full_case.status.value}"
     )
 
     return full_case
 
 
-def _score_case_for_area(case: Case, area_rules: Dict[str, Any]) -> float:
+def _pre_filter_case_type(case: Case, areas: Dict[str, Any]) -> str:
     """
-    Score a case against a specific area's rules.
+    Check if the case type is allowed by any area config.
 
-    Checks keywords in plaintiff/defendant names, and mediation signals.
+    Returns:
+        "pass" - case type is allowed
+        "reject" - case type is explicitly not allowed
+        "unknown" - case type couldn't be determined
+    """
+    if case.case_type is None:
+        return "Unknown"
+    
+    for area_name, area_rules in areas.items():
+        allowed_types = area_rules.get("allowed_case_types", [])
+        if not allowed_types:
+            return "pass"
+        if case.case_type in allowed_types:
+            return "pass"
+    return "reject"
+
+def _pre_filter_reject_keywords(case: Case, global_reject_keywords: List[str], areas: Dict[str, any]) -> Optional[str]:
+    """
+    Check plaintiff/defendant names against reject keywrod lists.
+
+    Returns:
+        The matched keyword string if rejected, None if passed.
+    """
+    searchable_text = f"{case.plaintiff} {case.defendant}".lower()
+    for kw in global_reject_keywords:
+        if kw.lower() in searchable_text:
+            return kw
+    
+    for area_name, area_rules in areas.items():
+        for kw in area_rules.get("reject_keywords", []):
+            if kw.lower() in searchable_text:
+                return kw
+    
+    return None
+
+
+def _score_company_name_match(case: Case, area_rules: Dict[str, Any]) -> float:
+    """
+    Score a case based on keyword matches in plaintiff/defendant names.
+    
+    This answers: "Is a party likely related to this area (e.g. construction)?"
+    It does NOT answer: "Is this case about a construction dispute?"
     """
     score = 0.0
     keywords = area_rules.get("keywords", [])
-    weight = area_rules.get("weight", 30)
-    mediation_signals = area_rules.get("mediation_signals", [])
+    weight = area_rules.get("company_match_weight", area_rules.get("weight", 20))
 
-    # Combine searchable text
-    searchable_text = " ".join([
-        case.plaintiff.lower(),
-        case.defendant.lower(),
-    ]).lower()
-
-    # Keyword matching
-    keyword_matches = 0
-    for keyword in keywords:
-        kw = keyword.lower()
+    searchable_text = f"{case.plaintiff} {case.defendant}".lower()
+    
+    matched_keywords = []
+    for kw in keywords:
+        kw = kw.lower()
         if len(kw) <= 3:
-            # For short acronyms (like "СК", "СМУ"), require word boundaries to avoid matching inside long words
             pattern = rf'(?:^|[\s"\'«»()\-,.]){re.escape(kw)}(?:[\s"\'«»()\-,.]|$)'
             if re.search(pattern, searchable_text):
-                keyword_matches += 1
+                matched_keywords.append(kw)
         else:
             if kw in searchable_text:
-                keyword_matches += 1
-
-    if keyword_matches > 0:
-        # Base score from keyword weight
+                matched_keywords.append(kw)
+    
+    if matched_keywords:
         score += weight
-        # Bonus for multiple keyword matches
-        score += min(keyword_matches - 1, 3) * 10
-
-    # Mediation signal bonus (if available in extracted data)
-    # These will be more useful in later stages when we have case page HTML
-    for signal in mediation_signals:
-        if signal.lower() in searchable_text:
-            score += 15
-
+        score += min(len(matched_keywords - 1, 3) * (weight * 0.3))
     return score
 
 

@@ -42,9 +42,56 @@ linkage_rules:
 scraping:
   base_url: "https://kad.arbitr.ru"
 
-  # Delays between requests (seconds)
-  min_delay: 2
-  max_delay: 4
+  # Per-action delays (seconds) — tune each independently
+  # Higher-risk actions (instance expansion, case page nav) should be slower
+  delays:
+    # Delay between paginated search result pages
+    between_pages:
+      min: 2
+      max: 4
+
+    # Delay before navigating to a case detail page
+    before_case_page:
+      min: 3
+      max: 6
+
+    # Delay between clicking each + button to expand instance history
+    between_instance_expand:
+      min: 1.0
+      max: 2.5
+
+    # Delay after all + buttons are clicked, before grabbing HTML
+    after_all_expanded:
+      min: 1.5
+      max: 3.0
+
+    # Delay for autocomplete dropdown to appear after typing
+    autocomplete_wait:
+      min: 2.5
+      max: 4.0
+
+    # Delay after pressing Enter on autocomplete
+    after_autocomplete_select:
+      min: 0.8
+      max: 1.5
+
+    # Delay before clicking the search button (mouse hover realism)
+    before_search_click:
+      min: 0.3
+      max: 0.8
+
+    # Delay after search results load
+    after_search_results:
+      min: 2.5
+      max: 4.0
+
+    # Delay between enrichment batches (breathing room)
+    between_batches:
+      min: 5
+      max: 10
+
+    # Human typing speed (ms per character)
+    typing_delay_ms: 100
 
   # Batch sizes
   batch_size: 10

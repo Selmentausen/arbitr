@@ -297,6 +297,14 @@ def _render_case_detail(repo: CaseRepository, case):
         st.markdown(f"**Категория:** {case.category or '—'}")
         st.markdown(f"**Балл:** {case.relevance_score:.1f}")
         st.markdown(f"**Статус:** {STATUS_LABELS.get(case.status.value, case.status.value)}")
+        if case.case_type:
+            st.markdown(f"**Тип дела:** {case.case_type}")
+        if case.case_status_text:
+            st.markdown(f"**Состояние:** {case.case_status_text}")
+        if case.case_category_text:
+            st.markdown(f"**Категория спора:** {case.case_category_text}")
+        if case.claim_amount:
+            st.markdown(f"**Сумма иска:** {case.claim_amount:,.2f} ₽")
         if case.extracted_data and case.extracted_data.get("duration"):
             st.markdown(f"**Длительность:** {case.extracted_data.get('duration')}")
 
@@ -304,49 +312,69 @@ def _render_case_detail(repo: CaseRepository, case):
     if case.judges:
         st.markdown(f"**Судьи:** {', '.join(case.judges)}")
 
-    # Participants
+    # Participants with INN/address
     if case.participants:
         st.markdown("---")
         st.markdown("**Участники:**")
         for role, participants in case.participants.items():
             role_label = {"plaintiff": "Истцы", "defendant": "Ответчики", "third_party": "Третьи лица", "other_party": "Иные лица"}.get(role, role)
-            names = ", ".join([p.name for p in participants])
-            st.markdown(f"- **{role_label}:** {names}")
+            st.markdown(f"**{role_label}:**")
+            for p in participants:
+                parts = [f"  - {p.name}"]
+                if p.inn:
+                    parts.append(f"ИНН: {p.inn}")
+                if p.address:
+                    parts.append(f"Адрес: {p.address}")
+                st.markdown(" | ".join(parts))
 
-    # Court instances
+    # Court instances with update history
     if case.instances:
         st.markdown("---")
         st.markdown("**Инстанции:**")
         for inst in case.instances:
-            # Build expanding card title
             title_parts = [inst.court_name]
-            if getattr(inst, 'instance_level', None):
+            if inst.instance_level:
                 title_parts.append(f"({inst.instance_level})")
             if inst.date:
                 title_parts.append(f"— {inst.date}")
+            if inst.result_text:
+                title_parts.append(f"| {inst.result_text}")
             title = " ".join(title_parts)
-            
+
             with st.expander(title):
-                st.markdown(f"**Суд:** {inst.court_name}")
-                
-                if getattr(inst, 'instance_level', None):
-                    st.markdown(f"**Инстанция:** {inst.instance_level}")
-                    
                 if inst.case_number:
                     st.markdown(f"**Номер дела:** {inst.case_number}")
-                    
                 if inst.incoming_number:
                     st.markdown(f"**Входящий номер:** {inst.incoming_number}")
-                    
-                if inst.date:
-                    st.markdown(f"**Дата:** {inst.date}")
-                
-                # Print documents natively inside the card
-                if getattr(inst, 'documents', []):
+
+                # Update history (chronology entries)
+                if inst.updates:
+                    st.markdown("**📜 Хронология:**")
+                    for upd in inst.updates:
+                        date_str = upd.date or ""
+                        type_str = upd.update_type or ""
+                        content_str = upd.content or ""
+                        line = f"- **{date_str}** {type_str}"
+                        if content_str:
+                            line += f" — {content_str}"
+                        if upd.subject:
+                            line += f" _(от: {upd.subject})_"
+                        st.markdown(line)
+
+                        if upd.pdf_url:
+                            full_url = upd.pdf_url if upd.pdf_url.startswith("http") else f"https://kad.arbitr.ru{upd.pdf_url}"
+                            st.markdown(f"  📄 [Скачать документ]({full_url})")
+
+                # Documents
+                if inst.documents:
                     st.markdown("**📄 Документы:**")
                     for doc in inst.documents:
                         full_url = doc.url if doc.url and doc.url.startswith("http") else f"https://kad.arbitr.ru{doc.url}"
-                        st.markdown(f"- [{doc.filename}]({full_url})")
+                        priority_badge = ""
+                        if doc.priority:
+                            badges = {"high": "🔴", "medium": "🟡", "low": "🟢", "uncategorized": "⚪"}
+                            priority_badge = badges.get(doc.priority, "") + " "
+                        st.markdown(f"- {priority_badge}[{doc.filename or 'Документ'}]({full_url})")
 
     # Extracted data
     if case.extracted_data:

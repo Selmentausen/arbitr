@@ -53,6 +53,11 @@ class ConfigManager:
             areas = self._config.get("areas", None)
             areas = areas if areas else None
             self._load_areas(areas=areas)
+            global_reject_path = self.config_path.parent / "dictionaries" / "global_reject_keywords.txt"
+            if global_reject_path.exists():
+                self._config["global_reject_keywords"] = self._read_dictionary_file(global_reject_path)
+            else:
+                self._config["global_reject_keywords"] = []
             logger.info(f"Loaded configuration from {self.config_path}")
             return self._config
         except yaml.YAMLError as e:
@@ -171,6 +176,9 @@ class ConfigManager:
                 if "stage2_keywords_file" in area_config:
                     dict_path = self.config_path.parent / area_config["stage2_keywords_file"]
                     area_config["stage2_keywords"] = self._read_dictionary_file(dict_path)
+                if "reject_keywords_file" in area_config:
+                    dict_path = self.config_path.parent / area_config["reject_keywrods_file"]
+                    area_config["reject_keywords"] = self._read_dictionary_file(dict_path)
                 self._config["areas"][area_name] = area_config
             except Exception as e:
                 logger.error(f"Error loading area config {area_file}: {e}")

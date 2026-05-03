@@ -8,7 +8,10 @@ from typing import List, Dict, Any, Optional
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-from src.models.case import CaseBase, CaseParticipant, CaseInstance, CaseDocument
+from src.models.case import (
+    CaseBase, CaseParticipant, CaseInstance, CaseDocument,
+    InstanceUpdate, PartyInfo
+    )
 from src.utils.logger import get_logger
 
 
@@ -81,8 +84,31 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
     result = {
         "participants": {},
         "instances": [],
-        "extracted_data": {}
+        "extracted_data": {},
+        "case_status_text": None,
+        "case_category_text": None,
+        "claim_amount": None,
     }
+
+    # -- Case-level metadata ---
+    
+    status_elem = soup.select_one('.b-case-header-desc')
+    if status_elem:
+        result["case_status_text"] = status_elem.get_text(strip=True)
+    
+    category_elem = soup.select_one('#case-category')
+    if category_elem:
+        result["case_category_text"] = category_elem.get_text(strip=True)
+
+    dur_elem = soup.select_one('.b-case-overview .case-dur')
+    if dur_elem:
+        result["extracted_data"]["duration"] = dur_elem.get_text(strip=True)
+
+    date_elem = soup.select_one('.b-case-overview .case-date a')
+    if date_elem:
+        result["extracted_data"]["registration_date"] = date_elem.get_text(strip=True)
+
+    # --- Participants ---
 
     participant_classes = {
         ".plaintiffs li": "plaintiff",
@@ -93,72 +119,218 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
     for html_class, section in participant_classes.items():
         for li in soup.select(html_class):
             name_elem = li.select_one('a')
-            detail_elem =li.select_one('.js-rolloverHtml')
+            rollover_elem =li.select_one('.js-rolloverHtml')
 
             if name_elem:
                 name = name_elem.get_text(strip=True)
-                detail = detail_elem.get_text(strip=True) if detail_elem else None
-                #TODO actually parse the ogrn, inn and address from detail
-                result["participants"].setdefault(section, []).append(CaseParticipant(name=name, address=detail, role=section))
+                inn = None
+                address = None
+                if rollover_elem:
+                    inn_div = rollover_elem.find('div')
+                    if inn_div:
+                        inn_match = re.search(r'ИНН:\s*(\d+)', inn_div.get_text(strip=True))
+                        if inn_match:
+                            inn = inn_match.group(1)
+                    rollover_copy = BeautifulSoup(str(rollover_elem), 'html.parser')
+                    for tag in rollover_copy.find_all(['strong', 'div']):
+                        tag.decompose()
+                    addr_text = rollover_copy.get_text(strip=True)
+                    if addr_text and addr_text != "Данные скрыты":
+                        address = addr_text
+                result["participants"].setdefault(section, []).append(
+                    CaseParticipant(name=name, address=address, inn=inn, role=section)
+                )
 
-    dur_elem = soup.select_one('.b-case-overview .case-dur')
-    if dur_elem:
-        result["extracted_data"]["duration"] = dur_elem.get_text(strip=True)
+    # --- Instances and their update history ---
 
-    date_elem = soup.select_one('.b-case-overview .case-date a')
-    if date_elem:
-        result["extracted_data"]["registration_date"] = date_elem.get_text(strip=True)
+    for instance_block in soup.select('.b-chrono-item-header.js-chrono-item-header'):
+        l_col = instance_block.select_one('.l-col')
+        r_col = instance_block.select_one('.r-col')
 
-    for instance_block in soup.select('.js-chrono-item-header'):
-        court_elem = instance_block.select_one('.instantion-name a')
-        court_name = court_elem.get_text(strip=True) if court_elem else "Неизвестный суд"
-        num_elem = instance_block.select_one('.b-case-instance-number')
-        case_num = num_elem.get_text(strip=True) if num_elem else None
-        
-        # Instance specific detailed properties
-        level_elem = instance_block.select_one('.l-col strong')
+        # Instance level (Первая инстанция, Апелляционная инстанция)
+        level_elem = l_col.select_one('strong') if l_col else None
         instance_level = level_elem.get_text(strip=True) if level_elem else None
 
-        reg_date_elem = instance_block.select_one('.b-reg-date')
+        # Date on the header
+        reg_date_elem = l_col.select_one('.b-reg-date') if l_col else None
         reg_date = reg_date_elem.get_text(strip=True) if reg_date_elem else None
 
-        inc_num_elem = instance_block.select_one('.b-reg-incoming_num')
-        inc_num = inc_num_elem.get_text(strip=True) if inc_num_elem else None
+        # Instance number and court
+        num_elem = r_col.select_one('.b-case-instance-number') if r_col else None
+        case_num = num_elem.get_text(strip=True) if num_elem else None
 
+        court_elem = r_col.select_one('.instantion-name a') if r_col else None
+        court_name = court_elem.get_text(strip=True) if court_elem else "Неизвестный суд"
+
+        # Header result text and PDF
+        result_text = None
+        result_pdf_url = None
+        result_h2 = r_col.select_one('h2.b-case-result') if r_col else None
+        if result_h2:
+            result_link = result_h2.select_one('a[href]')
+            if result_link:
+                result_pdf_url = result_link.get('href')
+                result_text = result_link.get_text(strip=True)
+            else:
+                result_text = result_h2.get_text(strip=True)
+
+        # --- Parse update history (items inside the expanded section) ---
+        updates = []
         docs = []
-        doc_links = instance_block.select('a[href*="/PdfDocument/"], a[href*="/Document/"]',)
 
-        for link in doc_links:
-            url = link.get('href')
-            case_result_text = link.get_text(strip=True)
-            filename = case_result_text if case_result_text else (url.split('/')[-1] if '/' in url else "document.pdf")
+        # The items container is the next sibling div after the header
+        items_container = instance_block.find_next_sibling(
+            'div', class_='b-chrono-items-container'
+        )
+        if items_container:
+            for item in items_container.select('.b-chrono-item.js-chrono-item'):
+                update = _parse_chrono_item(item)
+                updates.append(update)
 
-            doc = CaseDocument(
-                filename=filename,
-                url=url,
-                type=instance_level or "document"
-            )
-            docs.append(doc)
-        
-            if case_result_text:
-                result["extracted_data"].setdefault(court_name, {})["result"] = case_result_text
-        
-        if docs or case_num:
-            instance = CaseInstance(
-                court_name=court_name, 
-                case_number=case_num, 
-                instance_level=instance_level,
-                date=reg_date,
-                incoming_number=inc_num,
-                documents=docs
-            )
-            # Map instance type strictly into a property of the instance maybe but 
-            # currently we don't have level property on CaseInstance, so we map into documents type
-            result["instances"].append(instance)
+                # If this update has a PDF, also track it as a document
+                if update.pdf_url:
+                    docs.append(CaseDocument(
+                        id=item.get('data-id') or None,
+                        filename=update.content,
+                        url=update.pdf_url,
+                        date=update.date,
+                        type=update.update_type,
+                        publish_date=update.pdf_publish_date,
+                    ))
+
+        instance = CaseInstance(
+            court_name=court_name,
+            case_number=case_num,
+            instance_level=instance_level,
+            date=reg_date,
+            result_text=result_text,
+            result_pdf_url=result_pdf_url,
+            updates=updates,
+            documents=docs,
+        )
+        result["instances"].append(instance)
+
+    # --- Extract claim amount from the initial filing's additional-info ---
+    for item in soup.select('.b-chrono-item .additional-info'):
+        text = item.get_text(strip=True)
+        amount_match = re.search(r'Сумма исковых требований\s*([\d\s,\.]+)', text)
+        if amount_match:
+            try:
+                amount_str = amount_match.group(1).replace(' ', '').replace(',', '.')
+                result["claim_amount"] = float(amount_str)
+            except ValueError:
+                pass
+            break
 
     return result
 
+
+def _parse_chrono_item(item) -> InstanceUpdate:
+    """Parse a single chronology item (.b-chrono-item) into an InstanceUpdate."""
+    l_col = item.select_one('.l-col')
+    r_col = item.select_one('.r-col')
+
+    # Date
+    date_elem = l_col.select_one('.case-date') if l_col else None
+    date = date_elem.get_text(strip=True) if date_elem else None
+
+    # Update type (Определение, Письмо, Жалоба, etc.)
+    type_elem = l_col.select_one('.case-type') if l_col else None
+    update_type = type_elem.get_text(strip=True) if type_elem else None
+
+    # Subject (who filed / judge name)
+    subject = None
+    subject_elem = r_col.select_one('.case-subject') if r_col else None
+    if subject_elem:
+        subject = subject_elem.get_text(strip=True)
+
+    # Content text and PDF URL
+    content = None
+    pdf_url = None
+    if r_col:
+        result_elem = r_col.select_one('.b-case-result')
+        if result_elem:
+            pdf_link = result_elem.select_one('a.js-case-result-text--doc_link')
+            if pdf_link:
+                pdf_url = pdf_link.get('href')
+                content = pdf_link.get_text(strip=True)
+            else:
+                text_span = result_elem.select_one('.b-case-result-text')
+                if text_span:
+                    content = text_span.get_text(strip=True)
+
+    # Clean up content — remove [Подписано] prefix if present
+    if content:
+        content = re.sub(r'^\s*\[Подписано\]\s*', '', content).strip()
+
+    # Publication date
+    pdf_publish_date = None
+    publish_elem = r_col.select_one('.b-case-publish_info') if r_col else None
+    if publish_elem:
+        pdf_publish_date = publish_elem.get_text(strip=True)
+
+    # Additional info (barcode, claim amount, response-to references)
+    additional_info = None
+    info_elem = r_col.select_one('.additional-info') if r_col else None
+    if info_elem:
+        additional_info = info_elem.get_text(strip=True)
+
+    # Judge panel info from rollover
+    judge_panel = None
+    reporting_judge = None
+    judge_rollover = r_col.select_one('.js-judges-rolloverHtml') if r_col else None
+    if judge_rollover:
+        rollover_text = judge_rollover.get_text(separator="\n", strip=True)
+        panel_match = re.search(r'Судебный состав:\s*(.+)', rollover_text)
+        if panel_match:
+            judge_panel = panel_match.group(1).strip()
+        reporter_match = re.search(r'Судья-докладчик:\s*(.+)', rollover_text)
+        if reporter_match:
+            reporting_judge = reporter_match.group(1).strip()
+
+    return InstanceUpdate(
+        date=date,
+        update_type=update_type,
+        subject=subject,
+        content=content,
+        pdf_url=pdf_url,
+        pdf_publish_date=pdf_publish_date,
+        additional_info=additional_info,
+        judge_panel=judge_panel,
+        reporting_judge=reporting_judge,
+    )
+
+
+def _extract_party_info_from_rollover(td_element) -> Optional[PartyInfo]:
+    rollover = td_element.find('span', class_='js-rolloverHtml')
+    if not rollover:
+        return None
+
+    # Get the party name from the link
+    name_link = td_element.find('a')
+    name = name_link.get_text(strip=True) if name_link else None
+    if not name:
+        return None
+
+    # Extract INN from dedicated div
+    inn = None
+    inn_div = rollover.find('div')
+    if inn_div:
+        inn_text = inn_div.get_text(strip=True)
+        inn_match = re.search(r'ИНН:\s*(\d+)', inn_text)
+        if inn_match:
+            inn = inn_match.group(1)
     
+    rollover_copy = BeautifulSoup(str(rollover), 'html.parser')
+    for tag in rollover_copy.find_all(['strong', 'div']):
+        tag.decompose()
+    address = rollover_copy.get_text(strip=True)
+    if address == "Данные скрыты" or not address:
+        address = None
+    
+    return PartyInfo(name=name, inn=inn, address=address)
+
+
 
 def _extract_case_from_row(row) -> Optional[CaseBase]:
     """
@@ -178,17 +350,17 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
     case_number = case_link.get_text(strip=True)
     case_url = case_link.get('href', '')
     
-    # Extract case ID from URL
-    # Example: https://kad.arbitr.ru/Card/2fa9c31f-9617-4c7c-8b9b-2b2af75aace1
-    case_id_match = re.search(r'/Card/([a-f0-9-]+)', case_url)
-    if not case_id_match:
-        logger.warning(f"Could not extract case ID from URL: {case_url}")
-        return None
-    
-    case_id = case_id_match.group(1)
+    case_id = case_url.split("/")[-1]
     
     # Extract date
-    date_div = row.find('div', class_=re.compile(r'civil'))
+    case_type = None
+    date_div = None
+    for ct in ["civil", "administrative", "bankruptcy"]:
+        date_div = row.find('div', class_=ct)
+        if date_div:
+            case_type = ct
+            break
+
     date_str = date_div.find('span').get_text(strip=True) if date_div else ""
     filing_date = _parse_date(date_str) if date_str else None
     
@@ -217,6 +389,15 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
     # Extract defendant
     defendant_td = row.find('td', class_='respondent')
     defendant = _extract_party_names(defendant_td) if defendant_td else "Unknown"
+
+    plaintiff_info = _extract_party_info_from_rollover(plaintiff_td) if plaintiff_td else None
+
+    defendant_info = []
+    if defendant_td:
+        for rollover_span in defendant_td.find_all('span', class_=re.compile(r'rollover')):
+            info = _extract_party_info_from_rollover(rollover_span)
+            if info:
+                defendant_info.append(info)
     
     # Create CaseBase object
     try:
@@ -228,7 +409,11 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
             plaintiff=plaintiff,
             defendant=defendant,
             filing_date=filing_date,
-            case_url=case_url
+            case_url=case_url,
+            case_type=case_type,
+            plaintiff_info=plaintiff_info,
+            defendant_info=defendant_info,
+            scraped_at=datetime.utcnow(),
         )
         return case
     except Exception as e:

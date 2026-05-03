@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 
 from sqlalchemy import or_, func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, subqueryload
 
 from src.models.case import (
     Case,
@@ -18,12 +18,14 @@ from src.models.case import (
     CaseDocument,
     CaseInstance,
     CaseParticipant,
+    InstanceUpdate,
     StatusEnum,
 )
 from src.storage.database import (
     CaseRecord,
     DocumentRecord,
     InstanceRecord,
+    InstanceUpdateRecord,
     JudgeRecord,
     ParticipantRecord,
     CaseParticipantLink,
@@ -42,7 +44,12 @@ def _case_to_record(case: Case, session: Session) -> CaseRecord:
         court=case.court,
         filing_date=case.filing_date,
         case_url=case.case_url,
+        case_type=case.case_type,
+        current_instance=case.current_instance,
         is_simple_justice=case.is_simple_justice,
+        case_status_text=case.case_status_text,
+        case_category_text=case.case_category_text,
+        claim_amount=case.claim_amount,
         category=case.category,
         relevance_score=case.relevance_score,
         status=case.status.value if isinstance(case.status, StatusEnum) else case.status,
@@ -50,7 +57,9 @@ def _case_to_record(case: Case, session: Session) -> CaseRecord:
         aggregated_metrics_json=json.dumps(case.aggregated_metrics, ensure_ascii=False),
         raw_html=case.raw_html,
         pdf_texts_json=json.dumps(case.pdf_texts, ensure_ascii=False),
-        scraped_at=datetime.utcnow(),
+        case_page_scraped=case.case_page_scraped,
+        scraped_at=case.scraped_at or datetime.utcnow(),
+        last_scraped_at=case.last_scraped_at,
     )
 
     # Judges
@@ -60,7 +69,7 @@ def _case_to_record(case: Case, session: Session) -> CaseRecord:
     # Participants
     record.participants = _build_participant_links(session, case.participants)
 
-    # Instances and their documents
+    # Instances, their documents, and their updates
     for inst in case.instances:
         instance_record = InstanceRecord(
             court_name=inst.court_name,
@@ -68,17 +77,38 @@ def _case_to_record(case: Case, session: Session) -> CaseRecord:
             case_number=inst.case_number,
             incoming_number=inst.incoming_number,
             date=inst.date,
+            result_text=inst.result_text,
+            result_pdf_url=inst.result_pdf_url,
         )
         record.instances.append(instance_record)
-        
-        for doc in getattr(inst, 'documents', []):
+
+        for doc in inst.documents:
             record.documents.append(
                 DocumentRecord(
+                    doc_id=doc.id,
                     filename=doc.filename,
                     url=doc.url,
                     doc_type=doc.type,
                     date=doc.date,
-                    instance=instance_record
+                    priority=doc.priority,
+                    publish_date=doc.publish_date,
+                    extracted_text=doc.extracted_text,
+                    instance=instance_record,
+                )
+            )
+
+        for upd in inst.updates:
+            instance_record.updates.append(
+                InstanceUpdateRecord(
+                    date=upd.date,
+                    update_type=upd.update_type,
+                    subject=upd.subject,
+                    content=upd.content,
+                    pdf_url=upd.pdf_url,
+                    pdf_publish_date=upd.pdf_publish_date,
+                    additional_info=upd.additional_info,
+                    judge_panel=upd.judge_panel,
+                    reporting_judge=upd.reporting_judge,
                 )
             )
 
@@ -96,29 +126,47 @@ def _record_to_case(record: CaseRecord) -> Case:
         role = link.role
         p = link.participant
 
-        if role not in participants:
-            participants[role] = [CaseParticipant(name=p.name, address=p.address, inn=p.inn, ogrn=p.ogrn)]
-        
+        participants.setdefault(role, []).append(
+            CaseParticipant(name=p.name, address=p.address, inn=p.inn, ogrn=p.ogrn, role=role)
+        )
+
         if role == "plaintiff":
             plaintiff_names.append(p.name)
         elif role == "defendant":
             defendant_names.append(p.name)
 
-
-    # Build instances with documents
+    # Build instances with documents and updates
     instances = []
     for inst in record.instances:
-        # Reconstruct documents that belong to this instance
         inst_docs = [
             CaseDocument(
+                id=d.doc_id,
                 filename=d.filename,
                 url=d.url,
                 type=d.doc_type,
-                date=d.date
+                date=d.date,
+                priority=d.priority,
+                publish_date=d.publish_date,
+                extracted_text=d.extracted_text,
             )
             for d in inst.documents
         ]
-        
+
+        inst_updates = [
+            InstanceUpdate(
+                date=u.date,
+                update_type=u.update_type,
+                subject=u.subject,
+                content=u.content,
+                pdf_url=u.pdf_url,
+                pdf_publish_date=u.pdf_publish_date,
+                additional_info=u.additional_info,
+                judge_panel=u.judge_panel,
+                reporting_judge=u.reporting_judge,
+            )
+            for u in inst.updates
+        ]
+
         instances.append(
             CaseInstance(
                 court_name=inst.court_name,
@@ -126,7 +174,10 @@ def _record_to_case(record: CaseRecord) -> Case:
                 case_number=inst.case_number,
                 incoming_number=inst.incoming_number,
                 date=inst.date,
-                documents=inst_docs
+                result_text=inst.result_text,
+                result_pdf_url=inst.result_pdf_url,
+                updates=inst_updates,
+                documents=inst_docs,
             )
         )
 
@@ -137,11 +188,18 @@ def _record_to_case(record: CaseRecord) -> Case:
         id=record.id,
         case_number=record.case_number,
         court=record.court,
+        case_type=record.case_type,
+        current_instance=record.current_instance,
         plaintiff=", ".join(plaintiff_names) if plaintiff_names else "",
         defendant=", ".join(defendant_names) if defendant_names else "",
         filing_date=record.filing_date,
         case_url=record.case_url,
         is_simple_justice=record.is_simple_justice,
+        case_status_text=record.case_status_text,
+        case_category_text=record.case_category_text,
+        claim_amount=record.claim_amount,
+        case_page_scraped=record.case_page_scraped or False,
+        last_scraped_at=record.last_scraped_at,
         judges=judges,
         participants=participants,
         instances=instances,
@@ -220,7 +278,12 @@ class CaseRepository:
             existing.court = case.court
             existing.filing_date = case.filing_date
             existing.case_url = case.case_url
+            existing.case_type = case.case_type
+            existing.current_instance = case.current_instance
             existing.is_simple_justice = case.is_simple_justice
+            existing.case_status_text = case.case_status_text
+            existing.case_category_text = case.case_category_text
+            existing.claim_amount = case.claim_amount
             existing.category = case.category
             existing.relevance_score = case.relevance_score
             existing.status = case.status.value if isinstance(case.status, StatusEnum) else case.status
@@ -228,6 +291,8 @@ class CaseRepository:
             existing.aggregated_metrics_json = json.dumps(case.aggregated_metrics, ensure_ascii=False)
             existing.raw_html = case.raw_html
             existing.pdf_texts_json = json.dumps(case.pdf_texts, ensure_ascii=False)
+            existing.case_page_scraped = case.case_page_scraped
+            existing.last_scraped_at = case.last_scraped_at
             existing.updated_at = datetime.utcnow()
 
             # Update judges
@@ -239,10 +304,10 @@ class CaseRepository:
             existing.participants.clear()
             existing.participants.extend(_build_participant_links(self.session, case.participants))
 
-            # Update instances and their documents
+            # Update instances, documents, and updates
             existing.instances.clear()
             existing.documents.clear()
-            
+
             for inst in case.instances:
                 instance_record = InstanceRecord(
                     court_name=inst.court_name,
@@ -250,20 +315,39 @@ class CaseRepository:
                     case_number=inst.case_number,
                     incoming_number=inst.incoming_number,
                     date=inst.date,
+                    result_text=inst.result_text,
+                    result_pdf_url=inst.result_pdf_url,
                 )
                 existing.instances.append(instance_record)
-                
-                # Append documents tied to this instance
-                # They are also appended to existing.documents so case_id resolves correctly
-                for doc in getattr(inst, 'documents', []):
+
+                for doc in inst.documents:
                     doc_record = DocumentRecord(
+                        doc_id=doc.id,
                         filename=doc.filename,
                         url=doc.url,
                         doc_type=doc.type,
                         date=doc.date,
-                        instance=instance_record
+                        priority=doc.priority,
+                        publish_date=doc.publish_date,
+                        extracted_text=doc.extracted_text,
+                        instance=instance_record,
                     )
                     existing.documents.append(doc_record)
+
+                for upd in inst.updates:
+                    instance_record.updates.append(
+                        InstanceUpdateRecord(
+                            date=upd.date,
+                            update_type=upd.update_type,
+                            subject=upd.subject,
+                            content=upd.content,
+                            pdf_url=upd.pdf_url,
+                            pdf_publish_date=upd.pdf_publish_date,
+                            additional_info=upd.additional_info,
+                            judge_panel=upd.judge_panel,
+                            reporting_judge=upd.reporting_judge,
+                        )
+                    )
 
             self.session.commit()
             logger.debug(f"Updated case {case.id}")
@@ -330,10 +414,11 @@ class CaseRepository:
         record = (
             self.session.query(CaseRecord)
             .options(
-                joinedload(CaseRecord.participants),
-                joinedload(CaseRecord.documents),
-                joinedload(CaseRecord.instances),
-                joinedload(CaseRecord.judges),
+                subqueryload(CaseRecord.participants).joinedload(CaseParticipantLink.participant),
+                subqueryload(CaseRecord.documents),
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.updates),
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.documents),
+                subqueryload(CaseRecord.judges),
             )
             .filter(CaseRecord.id == case_id)
             .first()
@@ -367,12 +452,7 @@ class CaseRepository:
         Returns:
             Tuple of (list of cases, total count)
         """
-        query = self.session.query(CaseRecord).options(
-            joinedload(CaseRecord.participants),
-            joinedload(CaseRecord.documents),
-            joinedload(CaseRecord.instances),
-            joinedload(CaseRecord.judges),
-        )
+        query = self.session.query(CaseRecord)
 
         # Apply filters
         if status is not None:
@@ -382,7 +462,7 @@ class CaseRepository:
         if reviewed is not None:
             query = query.filter(CaseRecord.reviewed == reviewed)
 
-        # Count before pagination
+        # Count on the lightweight query (no joins)
         total = query.count()
 
         # Sort
@@ -394,9 +474,20 @@ class CaseRepository:
 
         # Paginate
         offset = (page - 1) * page_size
-        records = query.offset(offset).limit(page_size).all()
+        query = query.offset(offset).limit(page_size)
 
-        # Deduplicate (joinedload may produce dupes)
+        # Now apply eager loading only to the paginated subset
+        query = query.options(
+            subqueryload(CaseRecord.participants).joinedload(CaseParticipantLink.participant),
+            subqueryload(CaseRecord.documents),
+            subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.updates),
+            subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.documents),
+            subqueryload(CaseRecord.judges),
+        )
+
+        records = query.all()
+
+        # Deduplicate (shouldn't be needed with subqueryload, but safe)
         seen = set()
         unique_records = []
         for r in records:

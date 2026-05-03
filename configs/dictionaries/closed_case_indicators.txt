@@ -1,0 +1,11 @@
+# Case result texts that indicate a closed/resolved case.
+# If the last instance's result text contains any of these (case-insensitive),
+# the scraper will do a shallow scrape only (no instance expansion, no PDF text).
+# One pattern per line. Lines starting with # are comments.
+
+Мотивированное решение по делу
+О возвращении заявления
+О прекращении производства по делу
+Иск удовлетворить полностью
+Иск отказать полностью
+О возвращении искового заявления

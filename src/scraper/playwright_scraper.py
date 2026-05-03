@@ -12,6 +12,7 @@ Features:
 import asyncio
 import random
 import json
+from datetime import datetime
 from typing import List, Optional, Tuple
 from playwright.async_api import async_playwright, Page, BrowserContext
 from playwright_stealth import Stealth
@@ -45,8 +46,20 @@ class PlaywrightScraper:
         self.config = config
         self.headless = headless
         self.base_url = config.get("scraping.base_url", "https://kad.arbitr.ru")
-        self.min_delay = config.get("scraping.min_delay", 3)
-        self.max_delay = config.get("scraping.max_delay", 5)
+        
+        # Per-action delay configuration (all in seconds unless noted)
+        self.delays = {
+            "between_pages":           (config.get("scraping.delays.between_pages.min", 2),           config.get("scraping.delays.between_pages.max", 4)),
+            "before_case_page":        (config.get("scraping.delays.before_case_page.min", 3),        config.get("scraping.delays.before_case_page.max", 6)),
+            "between_instance_expand": (config.get("scraping.delays.between_instance_expand.min", 1), config.get("scraping.delays.between_instance_expand.max", 2.5)),
+            "after_all_expanded":      (config.get("scraping.delays.after_all_expanded.min", 1.5),    config.get("scraping.delays.after_all_expanded.max", 3)),
+            "autocomplete_wait":       (config.get("scraping.delays.autocomplete_wait.min", 2.5),     config.get("scraping.delays.autocomplete_wait.max", 4)),
+            "after_autocomplete_select":(config.get("scraping.delays.after_autocomplete_select.min", 0.8), config.get("scraping.delays.after_autocomplete_select.max", 1.5)),
+            "before_search_click":     (config.get("scraping.delays.before_search_click.min", 0.3),   config.get("scraping.delays.before_search_click.max", 0.8)),
+            "after_search_results":    (config.get("scraping.delays.after_search_results.min", 2.5),  config.get("scraping.delays.after_search_results.max", 4)),
+            "between_batches":         (config.get("scraping.delays.between_batches.min", 5),         config.get("scraping.delays.between_batches.max", 10)),
+        }
+        self.typing_delay_ms = config.get("scraping.delays.typing_delay_ms", 100)
         
         # Proxy configuration
         self.proxy_enabled = config.get("scraping.proxy.enabled", False)
@@ -83,6 +96,13 @@ class PlaywrightScraper:
             await self.browser.close()
         if hasattr(self, 'playwright_engine') and self.playwright_engine:
             await self.playwright_engine.stop()
+
+    async def _delay(self, action: str):
+        """Apply a random delay for the given action using config values."""
+        min_s, max_s = self.delays.get(action, (1, 2))
+        delay = random.uniform(min_s, max_s)
+        logger.debug(f"Delay [{action}]: {delay:.1f}s")
+        await asyncio.sleep(delay)
 
     async def _setup_browser(self, p) -> Tuple[BrowserContext, Page]:
         """Configure and launch browser with stealth settings."""
@@ -152,15 +172,15 @@ class PlaywrightScraper:
                 await page.click(judge_input_selector)
                 
                 # Mimic human typing
-                await page.type(judge_input_selector, judge_name, delay=100)
+                await page.type(judge_input_selector, judge_name, delay=self.typing_delay_ms * random.uniform(0.9, 1.1))
                 logger.info("Filled judge name")
                 
                 # Wait for autocomplete
-                await page.wait_for_timeout(3000)
+                await self._delay("autocomplete_wait")
                 
                 # Press Enter to select
                 await page.keyboard.press('Enter')
-                await page.wait_for_timeout(1000)
+                await self._delay("after_autocomplete_select")
                 
             except Exception as e:
                 logger.error(f"Failed to fill judge input: {e}")
@@ -171,10 +191,10 @@ class PlaywrightScraper:
             try:
                 await page.wait_for_selector(court_input_selector, state="visible", timeout=10000)
                 await page.click(court_input_selector)
-                await page.type(court_input_selector, court_name, delay=100)
-                await page.wait_for_timeout(2000)
+                await page.type(court_input_selector, court_name, delay=self.typing_delay_ms)
+                await self._delay("autocomplete_wait")
                 await page.keyboard.press("Enter")
-                await page.wait_for_timeout(1000)
+                await self._delay("after_autocomplete_select")
             except Exception as e:
                 logger.error(f"Failed to fill court input: {e}")
         else:
@@ -190,7 +210,7 @@ class PlaywrightScraper:
                 box = await button.bounding_box()
                 if box:
                     await page.mouse.move(box['x'] + 10, box['y'] + 10)
-                    await page.wait_for_timeout(500)
+                    await self._delay("before_search_click")
             
             await page.click(search_button_selector)
             logger.info("Clicked search button")
@@ -203,7 +223,7 @@ class PlaywrightScraper:
         try:
             # Wait for network idle which usually indicates search finished
             await page.wait_for_load_state("networkidle", timeout=30000)
-            await page.wait_for_timeout(3000)
+            await self._delay("after_search_results")
         except Exception as e:
             logger.warning(f"Wait for results timed out: {e}")
             
@@ -301,7 +321,7 @@ class PlaywrightScraper:
                 # Navigate to case page
                 logger.info(f"Navigating to case URL: {case_url}")
                 # Random delay before navigation
-                await asyncio.sleep(random.uniform(2, 5))
+                await self._delay("before_case_page")
                 
                 await page.goto(case_url, wait_until="domcontentloaded", timeout=60000)
                 try:
@@ -353,10 +373,9 @@ class PlaywrightScraper:
                 if len(cases) == 0: # Stop if previous page was empty
                     break
                     
-                # Random delay
-                delay = random.uniform(self.min_delay, self.max_delay)
-                logger.info(f"Waiting {delay:.1f}s before Page {current_page}...")
-                await asyncio.sleep(delay)
+                # Configurable delay between pages
+                logger.info(f"Waiting before Page {current_page}...")
+                await self._delay("between_pages")
                 
                 # Fetch next page
                 html_result = await self.fetch_api_page(self.page, court_id, judge_id, current_page, 25)
@@ -393,6 +412,9 @@ class PlaywrightScraper:
         Enrich a batch of cases by fetching and parsing their full case cards.
         Uses a single browser session to minimize overhead and avoid blocks.
         Updates the Case objects in place.
+        
+        Closed cases (detected by result text) get a shallow scrape only —
+        no instance expansion, no PDF text extraction.
         """
         if not cases:
             return
@@ -402,6 +424,10 @@ class PlaywrightScraper:
         if not valid_cases:
             logger.info("No cases with URLs to enrich.")
             return
+
+        # Load closed-case indicators from config file
+        closed_indicators = self._load_closed_case_indicators()
+        logger.info(f"Loaded {len(closed_indicators)} closed-case indicator patterns")
 
         logger.info(f"Starting batch enrichment for {len(valid_cases)} cases (batch_size={batch_size})")
         
@@ -417,25 +443,46 @@ class PlaywrightScraper:
                 batch = valid_cases[i:i + batch_size]
                 logger.info(f"Processing enrichment batch {i//batch_size + 1} ({len(batch)} cases)")
                 
+                # Delay between batches (except before the first)
+                if i > 0:
+                    await self._delay("between_batches")
+                
                 for case in batch:
                     logger.info(f"Fetching case card: {case.case_url}")
                     try:
-                        # Delay to mirror human pacing
-                        delay = random.uniform(self.min_delay, self.max_delay)
-                        await asyncio.sleep(delay)
+                        # Configurable delay before navigating to case page
+                        await self._delay("before_case_page")
                         
                         await self.page.goto(case.case_url, wait_until="domcontentloaded", timeout=60000)
                         try:
                             await self.page.wait_for_load_state("networkidle", timeout=10000)
                         except:
                             pass
+
+                        # --- Pre-filter: check if case is closed before deep scraping ---
+                        is_closed = await self._check_case_closed(closed_indicators)
+                        
+                        if is_closed:
+                            logger.info(f"Case {case.case_number} is CLOSED — shallow scrape only")
+                        else:
+                            # Deep scrape: expand instance chronologies
+                            collapse_buttons = await self.page.query_selector_all('.b-collapse.js-collapse')
+                            for btn in collapse_buttons:
+                                try:
+                                    await btn.click()
+                                    await self._delay("between_instance_expand")
+                                except Exception:
+                                    pass
                             
+                            if collapse_buttons:
+                                await self._delay("after_all_expanded")
+
                         html_content = await self.page.content()
                         
                         # Parse detailed card
                         card_data = parse_case_card(html_content)
                         
-                        # Update case object in-place (Case model inherits CaseBase)
+                        # Update case object in-place
                         if hasattr(case, 'raw_html'):
                             case.raw_html = html_content
                         
@@ -444,18 +491,71 @@ class PlaywrightScraper:
                             
                         if hasattr(case, 'extracted_data'):
                             case.extracted_data.update(card_data.get("extracted_data", {}))
+                            # Mark scrape depth
+                            case.extracted_data["scrape_depth"] = "shallow" if is_closed else "deep"
                         
                         if hasattr(case, 'participants') and card_data.get("participants"):
-                            # This overrides Stage 1 participants with fully detailed ones from Stage 2
                             case.participants = card_data["participants"]
+                        
+                        # New case-level metadata
+                        if hasattr(case, 'case_status_text'):
+                            case.case_status_text = card_data.get("case_status_text")
+                        if hasattr(case, 'case_category_text'):
+                            case.case_category_text = card_data.get("case_category_text")
+                        if hasattr(case, 'claim_amount') and card_data.get("claim_amount"):
+                            case.claim_amount = card_data["claim_amount"]
+                        if hasattr(case, 'case_page_scraped'):
+                            case.case_page_scraped = True
+                        if hasattr(case, 'last_scraped_at'):
+                            case.last_scraped_at = datetime.utcnow()
                             
-                        logger.debug(f"Successfully enriched {case.case_number}")
+                        logger.info(f"{'Shallow' if is_closed else 'Deep'}-scraped {case.case_number}")
                             
                     except Exception as e:
                         logger.error(f"Failed to enrich case {case.case_number}: {e}")
                             
         except Exception as e:
             logger.error(f"Batch enrichment failed: {e}")
+
+    def _load_closed_case_indicators(self) -> List[str]:
+        """Load closed-case indicator patterns from config file."""
+        from pathlib import Path
+        indicators_path = Path("configs/dictionaries/closed_case_indicators.txt")
+        if not indicators_path.exists():
+            logger.warning(f"Closed-case indicators file not found: {indicators_path}")
+            return []
+        
+        indicators = []
+        for line in indicators_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                indicators.append(line.lower())
+        return indicators
+
+    async def _check_case_closed(self, indicators: List[str]) -> bool:
+        """
+        Check the visible instance header result texts to determine
+        if the case is closed/resolved. Returns True if any result
+        text matches a closed-case indicator.
+        """
+        if not indicators:
+            return False
+        
+        try:
+            # Get all result text elements from the instance headers (visible without expanding)
+            result_elements = await self.page.query_selector_all('h2.b-case-result a, h2.b-case-result span')
+            
+            for elem in result_elements:
+                text = await elem.inner_text()
+                text_lower = text.strip().lower()
+                for indicator in indicators:
+                    if indicator in text_lower:
+                        logger.debug(f"Closed-case match: '{text.strip()}' contains '{indicator}'")
+                        return True
+        except Exception as e:
+            logger.warning(f"Failed to check case closure: {e}")
+        
+        return False
 
 
 async def main_playwright():
