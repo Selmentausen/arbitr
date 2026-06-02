@@ -25,7 +25,11 @@ def stage2_html_analyze(case: Case, config: ConfigManager) -> Case:
     Returns:
         Updated Case object
     """
-    if case.status not in (StatusEnum.UNCERTAIN, StatusEnum.INSUFFICIENT_INFO):
+    reject_enabled = config.get("filtering.reject_enabled", True)
+    if reject_enabled and case.status not in (
+        StatusEnum.UNCERTAIN,
+        StatusEnum.INSUFFICIENT_INFO,
+    ):
         return case
 
     # Make sure we have the area config

@@ -32,6 +32,17 @@ COURT_MAP = {
 }
 
 
+class JudgeCourtNotFoundError(Exception):
+    """No autocomplete row matched the target court (e.g. АС города Москвы)."""
+
+    def __init__(self, judge_search: str, detail: str = ""):
+        self.judge_search = judge_search
+        msg = f"No judge suggestion matching court for {judge_search!r}"
+        if detail:
+            msg += f": {detail}"
+        super().__init__(msg)
+
+
 class PlaywrightScraper:
     """Scraper using Playwright headless browser for DDOS-Guard bypass."""
     
@@ -60,27 +71,33 @@ class PlaywrightScraper:
             "between_batches":         (config.get("scraping.delays.between_batches.min", 5),         config.get("scraping.delays.between_batches.max", 10)),
         }
         self.typing_delay_ms = config.get("scraping.delays.typing_delay_ms", 100)
-        
+        self.target_court_filter = config.get("scraping.target_court_filter", "АС города Москвы")
+        self.last_judge_id: Optional[str] = None
+
         # Proxy configuration
         self.proxy_enabled = config.get("scraping.proxy.enabled", False)
         self.proxy_server = None
         self.proxy_username = None
         self.proxy_password = None
-        
+        self.proxy_port: Optional[int] = None
+
         if self.proxy_enabled:
             proxy_host = config.get("scraping.proxy.host")
             proxy_user = config.get("scraping.proxy.username")
             proxy_pass = config.get("scraping.proxy.password")
             port_min = config.get("scraping.proxy.port_range.min", 10000)
             port_max = config.get("scraping.proxy.port_range.max", 10999)
-            
-            # Random port from pool
-            proxy_port = random.randint(port_min, port_max)
-            
+            forced = config.get("scraping.proxy.forced_port")
+            if forced is not None:
+                proxy_port = int(forced)
+            else:
+                proxy_port = random.randint(port_min, port_max)
+            self.proxy_port = proxy_port
+
             self.proxy_server = f"http://{proxy_host}:{proxy_port}"
             self.proxy_username = proxy_user
             self.proxy_password = proxy_pass
-            
+
             logger.info(f"Playwright proxy enabled: {proxy_host}:{proxy_port}")
 
     async def __aenter__(self):
@@ -148,40 +165,113 @@ class PlaywrightScraper:
         return browser, context, page
 
     async def get_judge_id(self, judge_name: str) -> Optional[str]:
-        """
-        Get judge ID.
-        This is now implicitly handled during the UI search, 
-        but we keep this method for API compatibility or future use.
-        """
-        # Hardcoded for the specific task to save time/complexity if needed
-        # In a generic scraper, we would parse this from the suggestion dropdown
-        return "ec53dc1c-d1a2-42ad-a444-343fea428f92"
+        """Return judge UUID captured during UI autocomplete (pagination API)."""
+        return self.last_judge_id
 
-    async def search_cases_via_ui(self, page: Page, court_name: str = None, judge_name: str = None) -> str:
+    async def _select_judge_autocomplete(self, page: Page, text_to_type: str) -> Optional[str]:
+        """
+        Type a judge query, read rendered #b-suggest rows, pick row with target court,
+        select via keyboard, store last_judge_id from <a id="...">. Returns Id or None.
+        """
+        judge_input_selector = "#sug-judges input"
+        await page.wait_for_selector(judge_input_selector, state="visible", timeout=20000)
+        await page.click(judge_input_selector)
+        await page.fill(judge_input_selector, "")
+        await page.type(
+            judge_input_selector,
+            text_to_type,
+            delay=self.typing_delay_ms * random.uniform(0.9, 1.1),
+        )
+        logger.info("Filled judge name for suggest")
+        await self._delay("autocomplete_wait")
+        # Extra fixed wait for flaky suggest list rendering.
+        await page.wait_for_timeout(2000)
+        try:
+            await page.wait_for_selector(
+                "#b-suggest[style*='display: block'] .body__i ul li a",
+                timeout=5000,
+            )
+        except Exception:
+            logger.warning("Suggest popup did not become visible in time")
+            return None
+
+        suggest_rows = page.locator("#b-suggest .body__i ul li a")
+        row_count = await suggest_rows.count()
+        if row_count == 0:
+            logger.warning("No #b-suggest rows rendered after typing judge")
+            return None
+
+        target_index = None
+        chosen_id = None
+        chosen_name = None
+        suggest_rows_text = []
+        for idx in range(row_count):
+            row = suggest_rows.nth(idx)
+            txt = (await row.inner_text()).strip()
+            row_id = await row.get_attribute("id")
+            suggest_rows_text.append(txt)
+            if self.target_court_filter in txt:
+                if chosen_id is None:
+                    target_index = idx
+                    chosen_id = row_id
+                    chosen_name = txt
+                if text_to_type.split()[0] in txt:
+                    target_index = idx
+                    chosen_id = row_id
+                    chosen_name = txt
+                    break
+
+        if target_index is None or not chosen_id:
+            logger.info("Suggest rows debug: %s", suggest_rows_text)
+            logger.warning("No #b-suggest row matched target court filter")
+            return None
+
+        self.last_judge_id = chosen_id
+        short_label = chosen_name.split(",")[0].strip()
+        surname = short_label.split()[0] if short_label else text_to_type.split()[0]
+
+        try:
+            # Ensure key presses go to judge input's suggest list.
+            await page.click(judge_input_selector)
+            for _ in range(target_index):
+                await page.keyboard.press("ArrowDown")
+            await page.keyboard.press("Enter")
+            logger.info("Suggest rows debug: %s", suggest_rows_text)
+            logger.info(
+                "Selected judge suggest by keyboard at index=%s (id=%s)",
+                target_index,
+                chosen_id,
+            )
+        except Exception as e:
+            logger.error(f"Failed keyboard selection in judge suggest: {e}")
+            return None
+
+        await self._delay("after_autocomplete_select")
+        return chosen_id
+
+    async def search_cases_via_ui(
+        self,
+        page: Page,
+        court_name: str = None,
+        judge_name: str = None,
+    ) -> str:
         """
         Perform initial search via UI to establish session.
         Uses confirmed CSS selectors.
         """
         logger.info(f"Performing UI search for judge '{judge_name}'...")
-        
+
         # 1. Fill Judge Name
         if judge_name:
-            judge_input_selector = '#sug-judges input'
             try:
-                await page.wait_for_selector(judge_input_selector, state="visible", timeout=20000)
-                await page.click(judge_input_selector)
-                
-                # Mimic human typing
-                await page.type(judge_input_selector, judge_name, delay=self.typing_delay_ms * random.uniform(0.9, 1.1))
-                logger.info("Filled judge name")
-                
-                # Wait for autocomplete
-                await self._delay("autocomplete_wait")
-                
-                # Press Enter to select
-                await page.keyboard.press('Enter')
-                await self._delay("after_autocomplete_select")
-                
+                chosen = await self._select_judge_autocomplete(page, judge_name)
+                if not chosen:
+                    raise JudgeCourtNotFoundError(
+                        judge_name,
+                        f"no suggestion containing {self.target_court_filter!r}",
+                    )
+            except JudgeCourtNotFoundError:
+                raise
             except Exception as e:
                 logger.error(f"Failed to fill judge input: {e}")
                 raise
@@ -289,19 +379,24 @@ class PlaywrightScraper:
             
         return result
 
-    async def _init_session(self, page: Page, court: str, judge_name: str):
+    async def _init_session(
+        self,
+        page: Page,
+        court: str,
+        judge_name: str,
+    ):
         """Initialize session via UI search."""
         logger.info(f"Navigating to {self.base_url}...")
         try:
             await page.goto(self.base_url, wait_until="domcontentloaded", timeout=60000)
             try:
                 await page.wait_for_load_state("networkidle", timeout=10000)
-            except:
+            except Exception:
                 pass
         except Exception as e:
             logger.error(f"Navigation failed: {e}")
             raise
-        
+
         # Perform UI Search to warm up session
         await self.search_cases_via_ui(page, court, judge_name)
 
@@ -337,24 +432,41 @@ class PlaywrightScraper:
             finally:
                 await browser.close()
 
-    async def collect_cases(self, court_name: str = None, judge_name: str = None, max_cases: int = 100) -> List[CaseBase]:
+    async def collect_cases(
+        self,
+        court_name: str = None,
+        judge_name: str = None,
+        max_cases: int = 100,
+    ) -> List[CaseBase]:
         """
         Main collection method.
         Manages the browser lifecycle to keep one persistent session.
         """
         logger.info(f"Starting collection for {judge_name}, max_cases={max_cases}")
-        
-        # Determine Judge ID (using hardcoded for now, or could extract from UI)
-        judge_id = await self.get_judge_id(judge_name)
+
         court_id = COURT_MAP.get(court_name) if court_name else None
-        
+
+        # Each judge needs a fresh UI search and judge UUID (workers reuse one scraper instance)
+        if judge_name:
+            self.is_warmed_up = False
+            self.last_judge_id = None
+
         all_cases = []
         try:
             # 1. Initialize Session via UI if not warmed up
-            if not getattr(self, 'is_warmed_up', False):
-                await self._init_session(self.page, court_name, judge_name)
+            if not getattr(self, "is_warmed_up", False):
+                await self._init_session(
+                    self.page,
+                    court_name,
+                    judge_name,
+                )
                 self.is_warmed_up = True
-            
+
+            judge_id = self.last_judge_id or await self.get_judge_id(judge_name)
+            if judge_name and not judge_id:
+                logger.error("Judge ID missing after UI search; cannot paginate via API")
+                return []
+
             html_result = await self.page.content()
             
             # Debug: Save Page 1 HTML
@@ -378,7 +490,9 @@ class PlaywrightScraper:
                 await self._delay("between_pages")
                 
                 # Fetch next page
-                html_result = await self.fetch_api_page(self.page, court_id, judge_id, current_page, 25)
+                html_result = await self.fetch_api_page(
+                    self.page, court_id, judge_id, current_page, 25
+                )
                 
                 if not html_result:
                     logger.warning(f"Failed to fetch page {current_page}")
@@ -400,7 +514,9 @@ class PlaywrightScraper:
                 
             # Trim to max_cases
             return all_cases[:max_cases]
-                
+
+        except JudgeCourtNotFoundError:
+            raise
         except Exception as e:
             logger.error(f"Collection failed: {e}")
             import traceback
@@ -413,8 +529,8 @@ class PlaywrightScraper:
         Uses a single browser session to minimize overhead and avoid blocks.
         Updates the Case objects in place.
         
-        Closed cases (detected by result text) get a shallow scrape only —
-        no instance expansion, no PDF text extraction.
+        Closed cases get a shallow scrape unless pdf_download_enabled (then always expand).
+        When pdf_download_enabled, all instance PDFs are downloaded after parsing.
         """
         if not cases:
             return
@@ -429,8 +545,9 @@ class PlaywrightScraper:
         closed_indicators = self._load_closed_case_indicators()
         logger.info(f"Loaded {len(closed_indicators)} closed-case indicator patterns")
 
+        pdf_download_enabled = self.config.get("filtering.pdf_download_enabled", False)
         logger.info(f"Starting batch enrichment for {len(valid_cases)} cases (batch_size={batch_size})")
-        
+
         try:
             # Initialize session once to clear DDOS-Guard
             if not getattr(self, 'is_warmed_up', False):
@@ -459,12 +576,16 @@ class PlaywrightScraper:
                         except:
                             pass
 
-                        # --- Pre-filter: check if case is closed before deep scraping ---
                         is_closed = await self._check_case_closed(closed_indicators)
-                        
-                        if is_closed:
+                        shallow_only = is_closed and not pdf_download_enabled
+
+                        if shallow_only:
                             logger.info(f"Case {case.case_number} is CLOSED — shallow scrape only")
                         else:
+                            if is_closed and pdf_download_enabled:
+                                logger.info(
+                                    f"Case {case.case_number} is CLOSED — expanding for PDF download"
+                                )
                             # Deep scrape: expand instance chronologies
                             collapse_buttons = await self.page.query_selector_all('.b-collapse.js-collapse')
                             for btn in collapse_buttons:
@@ -492,7 +613,9 @@ class PlaywrightScraper:
                         if hasattr(case, 'extracted_data'):
                             case.extracted_data.update(card_data.get("extracted_data", {}))
                             # Mark scrape depth
-                            case.extracted_data["scrape_depth"] = "shallow" if is_closed else "deep"
+                            case.extracted_data["scrape_depth"] = (
+                                "shallow" if shallow_only else "deep"
+                            )
                         
                         if hasattr(case, 'participants') and card_data.get("participants"):
                             case.participants = card_data["participants"]
@@ -509,8 +632,27 @@ class PlaywrightScraper:
                         if hasattr(case, 'last_scraped_at'):
                             case.last_scraped_at = datetime.utcnow()
                             
-                        logger.info(f"{'Shallow' if is_closed else 'Deep'}-scraped {case.case_number}")
-                            
+                        if pdf_download_enabled and hasattr(case, "instances"):
+                            from pathlib import Path
+
+                            from src.scraper.pdf_downloader import download_pdfs_for_case
+
+                            pdf_root = Path(
+                                self.config.get("scraping.pdf_storage_dir", "data/pdfs")
+                            )
+                            pdf_stats = getattr(self, "pdf_traffic_stats", None)
+                            await download_pdfs_for_case(
+                                self.page,
+                                case,
+                                self.base_url,
+                                storage_dir=pdf_root,
+                                stats=pdf_stats,
+                            )
+
+                        logger.info(
+                            f"{'Shallow' if shallow_only else 'Deep'}-scraped {case.case_number}"
+                        )
+
                     except Exception as e:
                         logger.error(f"Failed to enrich case {case.case_number}: {e}")
                             

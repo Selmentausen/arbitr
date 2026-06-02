@@ -33,6 +33,18 @@ class FilterPipeline:
         """
         self.config = config
         self.thresholds = config.get_thresholds()
+        self.reject_enabled = config.get("filtering.reject_enabled", True)
+
+    def cases_for_enrichment(self, cases: List[Case]) -> List[Case]:
+        """Cases that should receive full case-card scraping."""
+        with_url = [c for c in cases if getattr(c, "case_url", None)]
+        if not self.reject_enabled:
+            return with_url
+        return [
+            c
+            for c in with_url
+            if c.status in (StatusEnum.UNCERTAIN, StatusEnum.INSUFFICIENT_INFO)
+        ]
 
     def process_case(self, case: CaseBase) -> Case:
         """
@@ -57,7 +69,11 @@ class FilterPipeline:
             )
             return result
 
-        if result.relevance_score <= low_threshold:
+        if (
+            self.reject_enabled
+            and result.relevance_score <= low_threshold
+            and result.status == StatusEnum.REJECT
+        ):
             logger.info(
                 f"Case {result.case_number}: score={result.relevance_score:.1f} → REJECT (skipping further stages)"
             )

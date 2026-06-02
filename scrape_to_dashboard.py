@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import datetime
 
 from src.config.manager import ConfigManager
-from src.scraper.playwright_scraper import PlaywrightScraper
+from src.scraper.playwright_scraper import JudgeCourtNotFoundError, PlaywrightScraper
 from src.scraper.parser import parse_case_list
 from src.filters.pipeline import FilterPipeline
 from src.storage.database import init_db
@@ -34,7 +34,7 @@ DB_PATH = str(Path("data/arbitr.db").absolute())
 
 async def scrape_and_store(
     judge_name: str = None,
-    court: str = "АС Московского округа",
+    court: str = "АС города Москвы",
     max_cases: int = 25,
     headless: bool = False,
     config_path: str = "configs/main.yaml",
@@ -74,6 +74,11 @@ async def scrape_and_store(
     async with scraper:
         try:
             cases = await scraper.collect_cases(court_name=court, judge_name=judge_name, max_cases=max_cases)
+        except JudgeCourtNotFoundError as e:
+            print(f"\n⚠️  Judge not found for target court: {e}")
+            print("  - Check judge name format (Surname I. O.)")
+            print("  - Judge may not sit at the configured court filter")
+            return
         except Exception as e:
             print(f"\n❌ Scraping failed: {e}")
             print("\nPossible causes:")
@@ -119,18 +124,16 @@ async def scrape_and_store(
             print(f"    {status}: {count}")
             
         # --- Step 2b: Stage 2 Enrichment ---
-        uncertain_cases = [
-            c for c in processed_cases 
-            if c.status in (StatusEnum.UNCERTAIN, StatusEnum.INSUFFICIENT_INFO)
-        ]
-        
-        if uncertain_cases:
-            print(f"\n🌐 Step 2b: Enriching {len(uncertain_cases)} uncertain cases (Stage 2)...")
+        enrich_cases = pipeline.cases_for_enrichment(processed_cases)
+
+        if enrich_cases:
+            print(f"\n🌐 Step 2b: Enriching {len(enrich_cases)} cases (Stage 2)...")
             # Perform batched page navigation to extract full participant and instance history
             try:
-                await scraper.batch_enrich_cases(uncertain_cases, batch_size=10, judge_name=judge_name, court_name=court)
-                # Re-run them through the pipeline's stage 2 filter
-                uncertain_cases = pipeline.process_stage2_batch(uncertain_cases)
+                await scraper.batch_enrich_cases(
+                    enrich_cases, batch_size=10, judge_name=judge_name, court_name=court
+                )
+                pipeline.process_stage2_batch(enrich_cases)
                 
                 # Recalculate status counts for final reporting
                 status_counts = {}
@@ -177,7 +180,12 @@ def main():
     parser.add_argument("--max-cases", type=int, default=25, help="Max cases to scrape")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
     parser.add_argument("--config", type=str, default="configs/main.yaml", help="Config path")
-    parser.add_argument("--court", type=str, default="АС Московского округа", help="Court name to filter by")
+    parser.add_argument(
+        "--court",
+        type=str,
+        default="АС города Москвы",
+        help="Court name (must match target_court_filter for judge autocomplete)",
+    )
     args = parser.parse_args()
     
     setup_logging(level="INFO")

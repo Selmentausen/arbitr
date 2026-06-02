@@ -202,6 +202,35 @@ class JudgeRecord(Base):
         return f"<JudgeRecord(name={self.name})>"
 
 
+class ScrapeEventRecord(Base):
+    """One parallel-scrape attempt (per judge / worker) for live dashboard metrics."""
+
+    __tablename__ = "scrape_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, nullable=True, index=True)  # groups events by scrape_parallel run
+    judge_name = Column(String, nullable=False, index=True)
+    worker_id = Column(Integer, nullable=False, index=True)
+    proxy_port = Column(Integer, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    cases_collected = Column(Integer, default=0)
+    status = Column(String, nullable=False, index=True)  # running | success | no_match | error
+    error_message = Column(Text, nullable=True)
+
+    def __repr__(self):
+        return f"<ScrapeEventRecord(judge={self.judge_name}, status={self.status})>"
+
+
+class ScrapeMetaRecord(Base):
+    """Single-row table for global scrape dashboard metadata."""
+
+    __tablename__ = "scrape_meta"
+
+    id = Column(Integer, primary_key=True, default=1)
+    throughput_reset_at = Column(DateTime, nullable=True)  # only count events after this
+
+
 # --- Database connection setup ---
 
 _engine = None

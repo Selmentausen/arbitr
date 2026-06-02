@@ -189,12 +189,14 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
 
                 # If this update has a PDF, also track it as a document
                 if update.pdf_url:
+                    from src.scraper.pdf_downloader import classify_priority
                     docs.append(CaseDocument(
                         id=item.get('data-id') or None,
                         filename=update.content,
                         url=update.pdf_url,
                         date=update.date,
                         type=update.update_type,
+                        priority=classify_priority(update.content),
                         publish_date=update.pdf_publish_date,
                     ))
 

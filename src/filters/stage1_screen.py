@@ -50,24 +50,32 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
     # Get all configured areas
     areas = config.get("areas", {})
     thresholds = config.get_thresholds()
+    reject_enabled = config.get("filtering.reject_enabled", True)
     global_reject_keywords = config.get("global_reject_keywords", [])
 
-    # Pre filter: Case Type
-    case_type_result = _pre_filter_case_type(full_case, areas)
-    if case_type_result == "reject":
-        full_case.status = StatusEnum.REJECT
-        full_case.extracted_data["reject_reason"] = f"case_type '{full_case.case_type}' not in allowed types"
-        return full_case
-    elif case_type_result == "unknown":
-        full_case.status = StatusEnum.INSUFFICIENT_INFO
-        full_case.extracted_data["reject_reason"] = "case_type unknown from search results"
+    if reject_enabled:
+        # Pre filter: Case Type
+        case_type_result = _pre_filter_case_type(full_case, areas)
+        if case_type_result == "reject":
+            full_case.status = StatusEnum.REJECT
+            full_case.extracted_data["reject_reason"] = (
+                f"case_type '{full_case.case_type}' not in allowed types"
+            )
+            return full_case
+        if case_type_result == "unknown":
+            full_case.status = StatusEnum.INSUFFICIENT_INFO
+            full_case.extracted_data["reject_reason"] = "case_type unknown from search results"
 
-    reject_match = _pre_filter_reject_keywords(full_case, global_reject_keywords, areas)
-    if reject_match:
-        full_case.status = StatusEnum.REJECT
-        full_case.relevance_score = 0.0
-        full_case.extracted_data["reject_reason"] = f"reject keyword matched: '{reject_match}'"
-        return full_case
+        reject_match = _pre_filter_reject_keywords(
+            full_case, global_reject_keywords, areas
+        )
+        if reject_match:
+            full_case.status = StatusEnum.REJECT
+            full_case.relevance_score = 0.0
+            full_case.extracted_data["reject_reason"] = (
+                f"reject keyword matched: '{reject_match}'"
+            )
+            return full_case
 
     score = 0.0
     best_area_name = None
@@ -104,7 +112,9 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
     elif score >= high_threshold:
         full_case.status = StatusEnum.HIGH_RELEVANT
     elif score <= low_threshold:
-        full_case.status = StatusEnum.REJECT
+        full_case.status = (
+            StatusEnum.REJECT if reject_enabled else StatusEnum.UNCERTAIN
+        )
     else:
         full_case.status = StatusEnum.UNCERTAIN
 
@@ -113,7 +123,7 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
 
     logger.debug(
         f"Stage 1: case={full_case.case_number}, "
-        f"area={matched_area}, "
+        f"area={best_area_name}, "
         f"score={score:.1f}, status={full_case.status.value}"
     )
 
@@ -130,7 +140,7 @@ def _pre_filter_case_type(case: Case, areas: Dict[str, Any]) -> str:
         "unknown" - case type couldn't be determined
     """
     if case.case_type is None:
-        return "Unknown"
+        return "unknown"
     
     for area_name, area_rules in areas.items():
         allowed_types = area_rules.get("allowed_case_types", [])
@@ -186,7 +196,7 @@ def _score_company_name_match(case: Case, area_rules: Dict[str, Any]) -> float:
     
     if matched_keywords:
         score += weight
-        score += min(len(matched_keywords - 1, 3) * (weight * 0.3))
+        score += min(len(matched_keywords) - 1, 3) * (weight * 0.3)
     return score
 
 

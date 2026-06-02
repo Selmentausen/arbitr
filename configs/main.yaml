@@ -15,6 +15,11 @@ judge_groups:
     group1:
       - "construction"
 
+# Filtering behavior (temporary: reject/PDF filters disabled while tuning)
+filtering:
+  reject_enabled: false
+  pdf_download_enabled: true
+
 # Scoring thresholds for filtering stages
 thresholds:
   # High relevance threshold - skip further analysis
@@ -52,18 +57,18 @@ scraping:
 
     # Delay before navigating to a case detail page
     before_case_page:
-      min: 3
-      max: 6
+      min: 2.5
+      max: 4
 
     # Delay between clicking each + button to expand instance history
     between_instance_expand:
       min: 1.0
-      max: 2.5
+      max: 2.2
 
     # Delay after all + buttons are clicked, before grabbing HTML
     after_all_expanded:
-      min: 1.5
-      max: 3.0
+      min: 1.2
+      max: 2.0
 
     # Delay for autocomplete dropdown to appear after typing
     autocomplete_wait:
@@ -96,6 +101,18 @@ scraping:
   # Batch sizes
   batch_size: 10
   max_concurrent: 3
+  pdf_storage_dir: data/pdfs
+
+  # Parallel runner (scrape_parallel.py)
+  parallel:
+    workers: 5
+    max_cases_per_judge: 100
+    requeue_on_failure: 0
+    default_court: "АС города Москвы"
+
+  # Judge suggest must list this court after the comma (e.g. "…, АС города Москвы")
+  target_court_filter: "АС города Москвы"
+  judges_file: "configs/dictionaries/judges.txt"
 
   # Retry configuration
   max_retries: 3
@@ -103,6 +120,7 @@ scraping:
   timeout: 30
 
   # Proxy configuration (rotating pool to avoid IP bans)
+  # Optional: forced_port (set at runtime by parallel runner; do not set manually unless debugging)
   proxy:
     enabled: false
     host: "pool.proxys.io"
