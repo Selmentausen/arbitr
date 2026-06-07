@@ -100,6 +100,7 @@ scraping:
 
   # Batch sizes
   batch_size: 10
+  collect_batch_size: 100   # cases to collect before enriching (0 = collect all first)
   max_concurrent: 3
   pdf_storage_dir: data/pdfs
 

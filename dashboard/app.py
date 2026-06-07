@@ -32,6 +32,15 @@ except ImportError:
 from src.storage.database import init_db
 from src.storage.repository import CaseRepository
 from src.models.case import StatusEnum
+from src.analysis.pdf_paths import find_local_pdf
+from src.analysis.classifier import (
+    apply_classification_to_case,
+    build_prompt_audit,
+    classify_case,
+    prepare_case_for_classification,
+)
+from src.config.classification import ClassificationConfig
+from src.config.manager import ConfigManager
 
 
 # --- Configuration ---
@@ -82,6 +91,7 @@ def main():
         [
             "⚡ Скрапинг — Live",
             "📊 Обзор",
+            "🤖 ML — Проверка",
             "📋 Список дел",
             "🔍 Поиск",
             "🏷️ Категоризация PDF",
@@ -94,6 +104,8 @@ def main():
         page_scrape_live(repo)
     elif page == "📊 Обзор":
         page_overview(repo)
+    elif page == "🤖 ML — Проверка":
+        page_ml_review(repo)
     elif page == "📋 Список дел":
         page_case_list(repo)
     elif page == "🔍 Поиск":
@@ -152,11 +164,72 @@ def page_scrape_live(repo: CaseRepository):
         f"60м: {tp['cases_last_60m']} · 10м: {tp['cases_last_10m']}"
     )
 
-    # Reset button
-    if st.button("🔄 Сбросить общий счётчик дел/ч", type="secondary"):
-        repo.reset_throughput()
-        st.success("Счётчик сброшен!")
-        st.rerun()
+    # Reset buttons
+    rcol1, rcol2 = st.columns(2)
+    with rcol1:
+        if st.button("🔄 Сбросить общий счётчик дел/ч", type="secondary"):
+            repo.reset_throughput()
+            st.success("Счётчик сброшен!")
+            st.rerun()
+    with rcol2:
+        if st.button("🗑️ Сбросить прогресс судей", type="secondary"):
+            cleared = repo.reset_judge_progress()
+            st.success(f"Прогресс сброшен ({cleared} записей). Следующий запуск начнёт с нуля.")
+            st.rerun()
+
+    # Judge progress table
+    all_progress = repo.get_all_judge_progress()
+    if all_progress:
+        st.subheader("Прогресс по судьям")
+        status_icons = {
+            "completed": "✅",
+            "collecting": "📥",
+            "enriching": "🔄",
+            "failed": "❌",
+            "pending": "⏳",
+        }
+        prog_rows = []
+        for p in all_progress:
+            prog_rows.append({
+                "Судья": p.judge_name,
+                "Статус": f"{status_icons.get(p.status, '?')} {p.status}",
+                "Собрано": p.cases_collected,
+                "Макс.": p.max_cases,
+                "Всего на сайте": p.total_count_at_start,
+                "Ошибка": (p.error_message or "")[:60],
+                "Обновлено": p.updated_at,
+            })
+        st.dataframe(prog_rows, width="stretch")
+
+        # Per-judge controls
+        judge_names = [p.judge_name for p in all_progress]
+        judge_map = {p.judge_name: p for p in all_progress}
+        c1, c2, c3, c4 = st.columns([3, 1.5, 1, 1])
+        with c1:
+            selected_judge = st.selectbox(
+                "Судья",
+                judge_names,
+                label_visibility="collapsed",
+                key="judge_ctrl_select",
+            )
+        with c2:
+            new_status = st.selectbox(
+                "Новый статус",
+                ["collecting", "enriching", "failed", "pending"],
+                format_func=lambda x: f"{status_icons.get(x, '?')} {x}",
+                label_visibility="collapsed",
+                key="judge_ctrl_status",
+            )
+        with c3:
+            if st.button("✏️ Изменить статус", key="change_judge_status"):
+                repo.upsert_judge_progress(selected_judge, status=new_status, error_message="")
+                st.success(f"Статус «{selected_judge}» → {new_status}")
+                st.rerun()
+        with c4:
+            if st.button("🗑️ Сбросить", key="reset_single_judge"):
+                repo.reset_judge_progress(judge_name=selected_judge)
+                st.success(f"Судья «{selected_judge}» сброшен.")
+                st.rerun()
 
     if tp.get("by_status_last_hour"):
         st.subheader("Статусы событий (за час)")
@@ -263,6 +336,159 @@ def page_overview(repo: CaseRepository):
             st.plotly_chart(fig, width="stretch")
 
 
+def page_ml_review(repo: CaseRepository):
+    """Dedicated view for ML-classified cases and human ML review."""
+    st.title("🤖 ML — Проверка дел")
+
+    stats = repo.get_ml_stats()
+    if stats["total_ml_classified"] == 0:
+        st.info(
+            "Пока нет дел с ML-классификацией. Запустите: `poetry run classify --limit 50`"
+        )
+        return
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("С ML-классификацией", stats["total_ml_classified"])
+    m2.metric("Проверено вручную", stats["human_reviewed"])
+    m3.metric("✅ Верно", stats["by_verdict"]["correct"])
+    m4.metric("❌ Неверно", stats["by_verdict"]["wrong"])
+    m5.metric("⚠️ Расхождение ML/ключ.", stats["disagreements"])
+
+    if "ml_page" not in st.session_state:
+        st.session_state.ml_page = 1
+
+    st.markdown("---")
+    st.subheader("Фильтры")
+
+    f1, f2, f3, f4, f5, f6 = st.columns(6)
+
+    with f1:
+        human_review = st.selectbox(
+            "Проверка ML",
+            ["all", "reviewed", "unreviewed"],
+            format_func=lambda x: {
+                "all": "Все",
+                "reviewed": "С проверкой",
+                "unreviewed": "Без проверки",
+            }[x],
+            key="ml_filter_human",
+        )
+    with f2:
+        verdict = st.selectbox(
+            "Вердикт",
+            [None, "correct", "wrong"],
+            format_func=lambda x: {
+                None: "Любой",
+                "correct": "✅ Верно",
+                "wrong": "❌ Неверно",
+            }[x],
+            key="ml_filter_verdict",
+        )
+    with f3:
+        ml_cat = st.selectbox(
+            "Категория ML",
+            [None, "construction", "intellectual_property", "other"],
+            format_func=lambda x: "Все" if x is None else ML_CATEGORY_LABELS.get(x, x),
+            key="ml_filter_category",
+        )
+    with f4:
+        uncertainty = st.selectbox(
+            "Неопределённость",
+            [None, "low", "medium", "high"],
+            format_func=lambda x: "Все" if x is None else x,
+            key="ml_filter_uncertainty",
+        )
+    with f5:
+        disagreement_only = st.checkbox("Только расхождения", key="ml_filter_disagree")
+    with f6:
+        sort_by = st.selectbox(
+            "Сортировка",
+            ["ml_analyzed_at", "ml_confidence", "case_number"],
+            format_func=lambda x: {
+                "ml_analyzed_at": "По дате ML",
+                "ml_confidence": "По уверенности",
+                "case_number": "По номеру",
+            }[x],
+            key="ml_filter_sort",
+        )
+
+    page_size = 50
+
+    filter_key = f"{human_review}|{verdict}|{ml_cat}|{uncertainty}|{disagreement_only}|{sort_by}"
+    if st.session_state.get("ml_filter_key") != filter_key:
+        st.session_state.ml_page = 1
+        st.session_state.ml_filter_key = filter_key
+
+    current_page = st.session_state.ml_page
+
+    human_param = None if human_review == "all" else human_review
+    if verdict is not None:
+        human_param = None
+
+    cases, total = repo.get_ml_cases(
+        page=current_page,
+        page_size=page_size,
+        human_review=human_param,
+        ml_review_verdict=verdict,
+        ml_category=ml_cat,
+        disagreement_only=disagreement_only,
+        uncertainty=uncertainty,
+        sort_by=sort_by,
+        sort_desc=True,
+        lite=True,
+    )
+
+    if not cases:
+        st.warning("Нет дел по выбранным фильтрам.")
+        return
+
+    st.caption(f"Показано {len(cases)} из {total} (страница {current_page})")
+
+    for case in cases:
+        ml = case.extracted_data.get("ml_classification") or {}
+        review = case.extracted_data.get("ml_review") or {}
+        primary = ml.get("primary_category", "—")
+        conf = (ml.get("confidence") or 0) * 100
+        verdict_label = {
+            "correct": "✅",
+            "wrong": "❌",
+        }.get(review.get("verdict"), "⏳")
+        disagree = (
+            case.category
+            and primary != "—"
+            and primary != case.category
+        )
+        header = (
+            f"**{case.case_number}** {verdict_label} · "
+            f"{case.plaintiff or '?'} vs {case.defendant or '?'} · "
+            f"ML: **{ML_CATEGORY_LABELS.get(primary, primary)}** ({conf:.0f}%) · "
+            f"Ключ. слова: **{case.category or '—'}**"
+        )
+        if disagree:
+            header += " · ⚠️ расхождение"
+
+        with st.expander(header, expanded=False):
+            _render_ml_case_brief(case, case.id)
+            _render_ml_classification(repo, case, embedded=True)
+
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    st.markdown("---")
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("◀ Назад", key="ml_page_prev", disabled=(current_page <= 1)):
+            st.session_state.ml_page -= 1
+            st.rerun()
+    with col_info:
+        st.markdown(
+            f"<div style='text-align:center'><b>Страница {current_page} / {total_pages}</b></div>",
+            unsafe_allow_html=True,
+        )
+    with col_next:
+        if st.button("Вперёд ▶", key="ml_page_next", disabled=(current_page >= total_pages)):
+            st.session_state.ml_page += 1
+            st.rerun()
+
+
 def page_case_list(repo: CaseRepository):
     """Case list with filters and pagination."""
     st.title("📋 Список дел")
@@ -279,10 +505,16 @@ def page_case_list(repo: CaseRepository):
             format_func=lambda x: "Все" if x is None else STATUS_LABELS.get(x, x),
         )
     with col2:
+        stats = repo.get_stats()
+        db_cats = [k for k in stats["by_category"].keys() if k]
+        for c in ["construction", "intellectual_property", "other"]:
+            if c not in db_cats:
+                db_cats.append(c)
+        db_cats.sort()
         category_filter = st.selectbox(
             "Категория",
-            [None, "construction", "bankruptcy"],
-            format_func=lambda x: "Все" if x is None else x.capitalize(),
+            [None] + db_cats,
+            format_func=lambda x: "Все" if x is None else ML_CATEGORY_LABELS.get(x, str(x)).capitalize(),
         )
     with col3:
         review_filter = st.selectbox(
@@ -471,22 +703,49 @@ def page_pdf_categorization():
         "Изменения влияют на следующие скрапинги."
     )
 
-    hcol1, hcol2, hcol3, hcol4, hcol5 = st.columns([1.5, 1, 1, 1, 1])
+    hcol1, hcol2, hcol3, hcol4, hcol5, hcol6 = st.columns([1.5, 1.5, 1, 1, 1, 1])
     pending = st.session_state.get("prio_edits", {})
     with hcol1:
         save_clicked = st.button(
             f"💾 Сохранить ({len(pending)})" if pending else "💾 Сохранить",
             type="primary",
             disabled=len(pending) == 0,
-            use_container_width=True,
+            width="stretch",
         )
     with hcol2:
-        st.metric("⚪ Без категории", len(grouped["uncategorized"]))
+        section_labels = {
+            "high": "ВЫСОКИЙ ПРИОРИТЕТ (скачивать PDF)",
+            "medium": "СРЕДНИЙ ПРИОРИТЕТ (только URL)",
+            "low": "НИЗКИЙ ПРИОРИТЕТ (только URL)",
+            "uncategorized": "БЕЗ КАТЕГОРИИ",
+        }
+        lines = []
+        for key in TAB_KEYS:
+            items = grouped[key]
+            lines.append(f"{'=' * 50}")
+            lines.append(f"  {section_labels[key]}  ({len(items)} шт.)")
+            lines.append(f"{'=' * 50}")
+            if items:
+                for text, count in items:
+                    lines.append(f"  {text}  —  {count}×")
+            else:
+                lines.append("  (пусто)")
+            lines.append("")
+        export_text = "\n".join(lines)
+        st.download_button(
+            "📥 Экспорт (.txt)",
+            data=export_text.encode("utf-8"),
+            file_name=f"pdf_categories_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain",
+            width="stretch",
+        )
     with hcol3:
-        st.metric("🔴 Высокий", len(grouped["high"]))
+        st.metric("⚪ Без категории", len(grouped["uncategorized"]))
     with hcol4:
-        st.metric("🟡 Средний", len(grouped["medium"]))
+        st.metric("🔴 Высокий", len(grouped["high"]))
     with hcol5:
+        st.metric("🟡 Средний", len(grouped["medium"]))
+    with hcol6:
         st.metric("🟢 Низкий", len(grouped["low"]))
 
     # --- Save logic ---
@@ -545,6 +804,7 @@ def page_pdf_categorization():
 # --- Shared Components ---
 
 PDF_DIR = project_root / "data" / "pdfs"
+CLASSIFICATION_CONFIG_PATH = project_root / "configs" / "classification.yaml"
 PRIORITY_BADGES = {"high": "🔴", "medium": "🟡", "low": "🟢", "uncategorized": "⚪"}
 PRIORITY_TIPS = {
     "high": "Высокий — PDF скачан",
@@ -554,30 +814,251 @@ PRIORITY_TIPS = {
 }
 
 
-def _safe_filename_from_url(url: str) -> str:
-    """Reproduce the same naming logic as pdf_downloader._safe_filename."""
-    import re
-    from urllib.parse import unquote, urlparse
-    name = unquote(urlparse(url).path.split("/")[-1] or "")
-    if not name:
-        return ""
-    name = re.sub(r'[<>:"|?*\\]', "_", name)
-    if name.lower().endswith(".pdf"):
-        name = name[:-4]
-    return name[:120]
-
-
 def _find_local_pdf(url: str) -> Path | None:
     """Find a downloaded PDF on disk by matching the URL to the expected filename."""
-    if not url or not PDF_DIR.exists():
-        return None
-    safe = _safe_filename_from_url(url)
-    if not safe:
-        return None
-    candidate = PDF_DIR / (safe + ".pdf")
-    if candidate.exists():
-        return candidate
-    return None
+    return find_local_pdf(url, PDF_DIR)
+
+
+ML_CATEGORY_LABELS = {
+    "construction": "Строительство",
+    "intellectual_property": "Интеллектуальная собственность",
+    "other": "Другое",
+}
+
+
+def _collect_case_pdfs(case) -> list[dict]:
+    """Unique PDF documents from instance documents (no chronology)."""
+    seen: set[str] = set()
+    pdfs: list[dict] = []
+    for inst in case.instances or []:
+        for doc in inst.documents or []:
+            if not doc.url or doc.url in seen:
+                continue
+            seen.add(doc.url)
+            pdfs.append({
+                "url": doc.url,
+                "label": doc.filename or doc.type or "PDF",
+                "priority": doc.priority or "uncategorized",
+                "downloaded": _find_local_pdf(doc.url) is not None,
+            })
+    return pdfs
+
+
+def _render_ml_case_brief(case, case_id: str):
+    """Compact case facts for ML review — parties, amounts, PDFs (no chronology)."""
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**Истец:** {case.plaintiff or '—'}")
+        st.markdown(f"**Ответчик:** {case.defendant or '—'}")
+        if case.claim_amount:
+            st.markdown(f"**Сумма иска:** {case.claim_amount:,.2f} ₽")
+        if case.filing_date:
+            st.markdown(f"**Дата подачи:** {case.filing_date.strftime('%d.%m.%Y')}")
+    with c2:
+        st.markdown(f"**Суд:** {case.court}")
+        if case.case_category_text:
+            st.markdown(f"**Категория спора:** {case.case_category_text}")
+        if case.case_status_text:
+            st.markdown(f"**Состояние:** {case.case_status_text}")
+        if case.case_url:
+            st.markdown(f"[🔗 kad.arbitr.ru]({case.case_url})")
+
+    pdfs = _collect_case_pdfs(case)
+    if pdfs:
+        downloaded = sum(1 for p in pdfs if p["downloaded"])
+        st.markdown(f"**PDF:** {len(pdfs)} документов ({downloaded} скачано локально)")
+        for p in pdfs[:10]:
+            _render_pdf_link(p["url"], p["label"][:100], case_id, p["priority"])
+        if len(pdfs) > 10:
+            st.caption(f"... и ещё {len(pdfs) - 10}")
+    else:
+        meta = case.extracted_data or {}
+        dl = meta.get("pdf_download_count")
+        rec = meta.get("pdf_recorded_urls")
+        if dl or rec:
+            st.markdown(f"**PDF:** скачано {dl or 0}, URL записано {len(rec) if rec else 0}")
+        else:
+            st.caption("PDF: нет данных")
+
+
+def _render_ollama_prompt_inspector(case, audit: dict | None = None):
+    """Show the prompt sent (or to be sent) to Ollama, with PDF inclusion stats."""
+    st.markdown("**📨 Запрос к Ollama**")
+
+    if audit:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Символов в досье", audit.get("dossier_chars", "—"))
+        c2.metric("PDF-блоков", audit.get("pdf_text_blocks", 0))
+        c3.metric("Символов PDF", audit.get("pdf_text_chars", 0))
+        pdf_ok = audit.get("includes_pdf_section", False)
+        c4.metric("PDF в промпте", "✅ да" if pdf_ok else "❌ нет")
+        if audit.get("pdf_text_blocks", 0) > 0 and not pdf_ok:
+            st.warning("PDF извлечены, но не попали в досье — проверьте лимиты в classification.yaml")
+
+    tab_user, tab_system = st.tabs(["User prompt (досье)", "System prompt"])
+    with tab_user:
+        st.code(audit.get("user_prompt", "—") if audit else "—", language=None)
+    with tab_system:
+        st.code(audit.get("system_prompt", "—") if audit else "—", language=None)
+
+
+def _render_ml_classification(repo: CaseRepository, case, embedded: bool = False):
+    """ML classification section with probabilities, reasoning, and review."""
+    if not embedded:
+        st.markdown("---")
+    st.markdown("**🤖 ML-классификация**")
+
+    ml = (case.extracted_data or {}).get("ml_classification")
+    ml_review = (case.extracted_data or {}).get("ml_review", {})
+
+    col_kw, col_ml = st.columns(2)
+    with col_kw:
+        st.caption("Ключевые слова (Stage 1/2)")
+        st.markdown(f"Категория: **{case.category or '—'}**")
+        st.markdown(f"Балл: **{case.relevance_score:.1f}**")
+    with col_ml:
+        st.caption("ML (Ollama)")
+        if ml:
+            primary = ml.get("primary_category", "—")
+            conf = ml.get("confidence", 0) * 100
+            st.markdown(f"Категория: **{ML_CATEGORY_LABELS.get(primary, primary)}**")
+            st.markdown(f"Уверенность: **{conf:.0f}%**")
+            if case.category and primary != case.category:
+                st.warning("⚠️ ML ≠ ключевые слова")
+        else:
+            st.markdown("_Ещё не классифицировано_")
+
+    if ml:
+        probs = ml.get("probabilities", {})
+        if probs:
+            fig = go.Figure(
+                go.Bar(
+                    x=[ML_CATEGORY_LABELS.get(k, k) for k in probs],
+                    y=[v * 100 for v in probs.values()],
+                    marker_color=["#3b82f6", "#8b5cf6", "#6b7280"][: len(probs)],
+                )
+            )
+            fig.update_layout(
+                height=200,
+                margin=dict(t=10, b=30, l=20, r=20),
+                yaxis_title="%",
+                showlegend=False,
+            )
+            st.plotly_chart(fig, width="stretch", key=f"ml_probs_{case.id}")
+
+        if ml.get("reasoning"):
+            st.markdown(f"**Обоснование:** {ml['reasoning']}")
+        signals = ml.get("key_signals") or []
+        if signals:
+            st.markdown("**Сигналы:** " + " · ".join(f"`{s}`" for s in signals))
+        uncertainty = ml.get("uncertainty", "")
+        if uncertainty:
+            badge = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(uncertainty, "")
+            st.caption(
+                f"{badge} Неопределённость: {uncertainty} · "
+                f"Модель: {ml.get('model', '—')} · "
+                f"Prompt v{ml.get('prompt_version', '—')} · "
+                f"{ml.get('analyzed_at', '')[:19]}"
+            )
+        pa = ml.get("prompt_audit")
+        if pa:
+            pdf_flag = "✅" if pa.get("includes_pdf_section") else "❌"
+            st.caption(
+                f"Запрос Ollama: {pa.get('dossier_chars', 0)} симв. · "
+                f"PDF {pdf_flag} ({pa.get('pdf_text_blocks', 0)} блоков, "
+                f"{pa.get('pdf_text_chars', 0)} симв.)"
+            )
+
+    # Ollama prompt inspector — saved audit or live rebuild
+    audit = (ml or {}).get("prompt_audit")
+    insp_col1, insp_col2 = st.columns([1, 3])
+    with insp_col1:
+        show_saved = st.button("📨 Показать запрос", key=f"ml_show_prompt_{case.id}")
+    with insp_col2:
+        rebuild = st.button(
+            "🔁 Пересобрать превью (с PDF)",
+            key=f"ml_rebuild_prompt_{case.id}",
+            help="Извлекает PDF заново и показывает актуальный промпт без вызова Ollama",
+        )
+
+    if show_saved and audit:
+        _render_ollama_prompt_inspector(case, audit)
+    elif rebuild:
+        try:
+            clf_config = ClassificationConfig(str(CLASSIFICATION_CONFIG_PATH))
+            main_cfg = ConfigManager()
+            pdf_dir = Path(main_cfg.get("scraping.pdf_storage_dir", "data/pdfs"))
+            with st.spinner("Сборка досье и PDF..."):
+                updated, prompt = prepare_case_for_classification(case, clf_config, pdf_dir)
+                live_audit = build_prompt_audit(updated, prompt)
+            _render_ollama_prompt_inspector(updated, live_audit)
+        except Exception as e:
+            st.error(f"Ошибка сборки промпта: {e}")
+    elif show_saved and not audit:
+        st.info(
+            "Нет сохранённого запроса (классификация до этой функции). "
+            "Нажмите «Пересобрать превью» или переклассифицируйте дело."
+        )
+
+    btn_col1, btn_col2 = st.columns([1, 3])
+    with btn_col1:
+        if st.button("🔄 Классифицировать", key=f"ml_classify_{case.id}"):
+            try:
+                clf_config = ClassificationConfig(str(CLASSIFICATION_CONFIG_PATH))
+                main_cfg = ConfigManager()
+                pdf_dir = Path(main_cfg.get("scraping.pdf_storage_dir", "data/pdfs"))
+                with st.spinner("Ollama классифицирует дело..."):
+                    updated, result, prompt = classify_case(case, clf_config, pdf_dir)
+                    if result:
+                        updated = apply_classification_to_case(updated, result, clf_config, prompt)
+                        repo.save_case(updated)
+                        st.success("Классификация сохранена!")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
+
+    # Human review of ML result
+    if ml:
+        st.markdown("**Проверка ML:**")
+        rc1, rc2, rc3 = st.columns([1, 1, 2])
+        with rc1:
+            if st.button("✅ Верно", key=f"ml_ok_{case.id}"):
+                repo.save_ml_review(case.id, verdict="correct")
+                st.rerun()
+        with rc2:
+            if st.button("❌ Неверно", key=f"ml_wrong_{case.id}"):
+                repo.save_ml_review(case.id, verdict="wrong")
+                st.rerun()
+        with rc3:
+            correct_cat = st.selectbox(
+                "Правильная категория",
+                [None, "construction", "bankruptcy", "other"],
+                format_func=lambda x: "—" if x is None else ML_CATEGORY_LABELS.get(x, x),
+                key=f"ml_correct_{case.id}",
+                index=0,
+            )
+            review_notes = st.text_input(
+                "Заметки по ML",
+                value=ml_review.get("notes") or "",
+                key=f"ml_notes_{case.id}",
+            )
+            if st.button("💾 Сохранить проверку ML", key=f"ml_save_review_{case.id}"):
+                verdict = ml_review.get("verdict") or "reviewed"
+                repo.save_ml_review(
+                    case.id,
+                    verdict=verdict,
+                    correct_category=correct_cat,
+                    notes=review_notes or None,
+                )
+                st.success("Проверка ML сохранена")
+                st.rerun()
+        if ml_review.get("verdict"):
+            st.caption(
+                f"Проверено: {ml_review.get('verdict')} "
+                f"({ml_review.get('reviewed_at', '')[:19]})"
+            )
+
+
 
 
 _pdf_link_counter = 0
@@ -716,6 +1197,8 @@ def _render_case_detail(repo: CaseRepository, case):
     if case.extracted_data:
         with st.popover("📄 Извлеченные данные"):
             st.json(case.extracted_data)
+
+    _render_ml_classification(repo, case)
 
     # Review section
     st.markdown("---")

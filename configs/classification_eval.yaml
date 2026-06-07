@@ -1,0 +1,7 @@
+# Golden evaluation set — add case IDs as you review in the dashboard.
+# Run: poetry run classify-eval
+
+cases: []
+# Example:
+#   - id: "abc-123-uuid-from-db"
+#     expected: construction

@@ -73,7 +73,7 @@ async def scrape_and_store(
     
     async with scraper:
         try:
-            cases = await scraper.collect_cases(court_name=court, judge_name=judge_name, max_cases=max_cases)
+            cases, _pagination = await scraper.collect_cases(court_name=court, judge_name=judge_name, max_cases=max_cases)
         except JudgeCourtNotFoundError as e:
             print(f"\n⚠️  Judge not found for target court: {e}")
             print("  - Check judge name format (Surname I. O.)")

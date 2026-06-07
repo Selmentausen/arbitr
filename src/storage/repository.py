@@ -27,6 +27,7 @@ from src.storage.database import (
     DocumentRecord,
     InstanceRecord,
     InstanceUpdateRecord,
+    JudgeProgressRecord,
     JudgeRecord,
     ParticipantRecord,
     CaseParticipantLink,
@@ -567,6 +568,215 @@ class CaseRepository:
         logger.debug(f"Marked case {case_id} as reviewed={reviewed}")
         return True
 
+    def save_ml_review(
+        self,
+        case_id: str,
+        verdict: str,
+        correct_category: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        """Save human review of ML classification."""
+        record = self.session.get(CaseRecord, case_id)
+        if record is None:
+            return False
+
+        extracted = json.loads(record.extracted_data_json or "{}")
+        extracted["ml_review"] = {
+            "verdict": verdict,
+            "correct_category": correct_category,
+            "notes": notes,
+            "reviewed_at": datetime.utcnow().isoformat(),
+        }
+        record.extracted_data_json = json.dumps(extracted, ensure_ascii=False)
+        record.updated_at = datetime.utcnow()
+        self.session.commit()
+        logger.debug("Saved ML review for case %s: %s", case_id, verdict)
+        return True
+
+    def list_cases_for_classification(
+        self,
+        limit: int = 100,
+        force: bool = False,
+        case_id: Optional[str] = None,
+    ) -> List[Case]:
+        """
+        List cases eligible for ML classification.
+
+        By default skips cases that already have ml_classification in extracted_data.
+        """
+        query = (
+            self.session.query(CaseRecord)
+            .options(
+                subqueryload(CaseRecord.participants).joinedload(CaseParticipantLink.participant),
+                subqueryload(CaseRecord.documents),
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.updates),
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.documents),
+                subqueryload(CaseRecord.judges),
+            )
+            .order_by(CaseRecord.created_at.desc())
+        )
+        if case_id:
+            query = query.filter(CaseRecord.id == case_id)
+
+        scan_limit = limit if case_id else max(limit * 5, limit)
+        records = query.limit(scan_limit).all()
+
+        cases: List[Case] = []
+        for record in records:
+            case = _record_to_case(record)
+            if force or "ml_classification" not in case.extracted_data:
+                cases.append(case)
+            if len(cases) >= limit:
+                break
+        return cases
+
+    def get_ml_stats(self) -> Dict[str, Any]:
+        """Aggregate counts for ML-classified cases (lightweight JSON scan)."""
+        rows = (
+            self.session.query(
+                CaseRecord.id,
+                CaseRecord.extracted_data_json,
+                CaseRecord.category,
+            )
+            .filter(
+                CaseRecord.extracted_data_json.isnot(None),
+                CaseRecord.extracted_data_json.contains('"ml_classification"'),
+            )
+            .all()
+        )
+
+        by_ml_category: Dict[str, int] = {}
+        by_verdict: Dict[str, int] = {"correct": 0, "wrong": 0, "unreviewed": 0}
+        disagreements = 0
+
+        for _id, extracted_json, keyword_category in rows:
+            extracted = json.loads(extracted_json or "{}")
+            ml = extracted.get("ml_classification") or {}
+            primary = ml.get("primary_category") or "unknown"
+            by_ml_category[primary] = by_ml_category.get(primary, 0) + 1
+
+            review = extracted.get("ml_review") or {}
+            verdict = review.get("verdict")
+            if verdict == "correct":
+                by_verdict["correct"] += 1
+            elif verdict == "wrong":
+                by_verdict["wrong"] += 1
+            else:
+                by_verdict["unreviewed"] += 1
+
+            if keyword_category and primary and primary != keyword_category:
+                disagreements += 1
+
+        total_ml = len(rows)
+        human_reviewed = by_verdict["correct"] + by_verdict["wrong"]
+        return {
+            "total_ml_classified": total_ml,
+            "human_reviewed": human_reviewed,
+            "by_verdict": by_verdict,
+            "by_ml_category": by_ml_category,
+            "disagreements": disagreements,
+        }
+
+    def get_ml_cases(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        human_review: Optional[str] = None,
+        ml_review_verdict: Optional[str] = None,
+        ml_category: Optional[str] = None,
+        disagreement_only: bool = False,
+        uncertainty: Optional[str] = None,
+        sort_by: str = "ml_analyzed_at",
+        sort_desc: bool = True,
+        lite: bool = False,
+    ) -> Tuple[List[Case], int]:
+        """
+        List cases that have ML classification, with ML-specific filters.
+
+        Args:
+            human_review: None=all, "reviewed"=has ml_review, "unreviewed"=no ml_review
+            ml_review_verdict: "correct", "wrong", or None
+            ml_category: filter by ML primary_category
+            disagreement_only: ML primary != keyword category
+            uncertainty: "low", "medium", "high"
+            sort_by: ml_analyzed_at, ml_confidence, case_number, created_at
+            lite: skip chronology (instance updates) when loading cases
+        """
+        load_options = [
+            subqueryload(CaseRecord.participants).joinedload(CaseParticipantLink.participant),
+            subqueryload(CaseRecord.judges),
+        ]
+        if lite:
+            load_options.append(
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.documents)
+            )
+        else:
+            load_options.extend([
+                subqueryload(CaseRecord.documents),
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.updates),
+                subqueryload(CaseRecord.instances).subqueryload(InstanceRecord.documents),
+            ])
+
+        query = (
+            self.session.query(CaseRecord)
+            .filter(
+                CaseRecord.extracted_data_json.isnot(None),
+                CaseRecord.extracted_data_json.contains('"ml_classification"'),
+            )
+            .options(*load_options)
+        )
+
+        if ml_review_verdict == "correct":
+            query = query.filter(CaseRecord.extracted_data_json.contains('"verdict": "correct"'))
+        elif ml_review_verdict == "wrong":
+            query = query.filter(CaseRecord.extracted_data_json.contains('"verdict": "wrong"'))
+        elif human_review == "reviewed":
+            query = query.filter(CaseRecord.extracted_data_json.contains('"ml_review"'))
+        elif human_review == "unreviewed":
+            query = query.filter(~CaseRecord.extracted_data_json.contains('"ml_review"'))
+
+        records = query.all()
+        seen: set[str] = set()
+        cases: List[Case] = []
+
+        for record in records:
+            if record.id in seen:
+                continue
+            seen.add(record.id)
+            case = _record_to_case(record)
+            ml = case.extracted_data.get("ml_classification") or {}
+            review = case.extracted_data.get("ml_review") or {}
+
+            if ml_category and ml.get("primary_category") != ml_category:
+                continue
+            if uncertainty and ml.get("uncertainty") != uncertainty:
+                continue
+            if disagreement_only:
+                primary = ml.get("primary_category")
+                if not primary or not case.category or primary == case.category:
+                    continue
+            if human_review == "unreviewed" and review.get("verdict"):
+                continue
+            if human_review == "reviewed" and not review.get("verdict"):
+                continue
+
+            cases.append(case)
+
+        def _sort_key(c: Case):
+            ml = c.extracted_data.get("ml_classification") or {}
+            if sort_by == "ml_confidence":
+                return ml.get("confidence") or 0.0
+            if sort_by == "ml_analyzed_at":
+                return ml.get("analyzed_at") or ""
+            if sort_by == "case_number":
+                return c.case_number or ""
+            return c.created_at.isoformat() if getattr(c, "created_at", None) else ""
+
+        cases.sort(key=_sort_key, reverse=sort_desc)
+        total = len(cases)
+        offset = (page - 1) * page_size
+        return cases[offset : offset + page_size], total
+
     # --- Stats ---
 
     def get_stats(self) -> Dict[str, Any]:
@@ -969,6 +1179,84 @@ class CaseRepository:
 
         else:
             raise ValueError(f"Unsupported export format: {format}")
+
+    # --- Judge progress (resume support) ---
+
+    def get_judge_progress(self, judge_name: str) -> Optional[JudgeProgressRecord]:
+        return (
+            self.session.query(JudgeProgressRecord)
+            .filter(JudgeProgressRecord.judge_name == judge_name)
+            .first()
+        )
+
+    def get_all_judge_progress(self) -> List[JudgeProgressRecord]:
+        return self.session.query(JudgeProgressRecord).order_by(JudgeProgressRecord.judge_name).all()
+
+    def upsert_judge_progress(
+        self,
+        judge_name: str,
+        *,
+        court: Optional[str] = None,
+        status: Optional[str] = None,
+        cases_collected: Optional[int] = None,
+        total_count_at_start: Optional[int] = None,
+        max_cases: Optional[int] = None,
+        error_message: Optional[str] = None,
+        completed_at: Optional[datetime] = None,
+    ) -> JudgeProgressRecord:
+        rec = self.get_judge_progress(judge_name)
+        if rec is None:
+            rec = JudgeProgressRecord(
+                judge_name=judge_name,
+                court=court or "",
+                status=status or "pending",
+                cases_collected=cases_collected or 0,
+                total_count_at_start=total_count_at_start or 0,
+                max_cases=max_cases or 0,
+                started_at=datetime.utcnow(),
+            )
+            self.session.add(rec)
+        else:
+            if court is not None:
+                rec.court = court
+            if status is not None:
+                rec.status = status
+            if cases_collected is not None:
+                rec.cases_collected = cases_collected
+            if total_count_at_start is not None:
+                rec.total_count_at_start = total_count_at_start
+            if max_cases is not None:
+                rec.max_cases = max_cases
+            if error_message is not None:
+                rec.error_message = error_message
+            if completed_at is not None:
+                rec.completed_at = completed_at
+            rec.updated_at = datetime.utcnow()
+        self.session.commit()
+        return rec
+
+    def reset_judge_progress(self, judge_name: Optional[str] = None) -> int:
+        """Clear progress. If judge_name given, reset only that judge; else reset all."""
+        q = self.session.query(JudgeProgressRecord)
+        if judge_name:
+            q = q.filter(JudgeProgressRecord.judge_name == judge_name)
+        count = q.delete()
+        self.session.commit()
+        return count
+
+    def mark_collecting_as_failed(self, reason: str = "Interrupted") -> int:
+        """Mark any in-progress judges as failed (crash recovery)."""
+        rows = (
+            self.session.query(JudgeProgressRecord)
+            .filter(JudgeProgressRecord.status.in_(["collecting", "enriching"]))
+            .all()
+        )
+        for r in rows:
+            r.status = "failed"
+            r.error_message = reason
+            r.updated_at = datetime.utcnow()
+        self.session.commit()
+        return len(rows)
 
     # --- Delete ---
 

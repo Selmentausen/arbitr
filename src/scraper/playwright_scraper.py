@@ -437,23 +437,29 @@ class PlaywrightScraper:
         court_name: str = None,
         judge_name: str = None,
         max_cases: int = 100,
-    ) -> List[CaseBase]:
+        start_page: int = 1,
+        on_page_done: callable = None,
+    ) -> tuple[List[CaseBase], dict]:
         """
         Main collection method.
-        Manages the browser lifecycle to keep one persistent session.
+        Returns (cases, pagination) where pagination contains total_count from the site.
+
+        Args:
+            start_page: Page to begin collecting from (1 = first page).
+                        Pages before start_page are fetched for session warmup but discarded.
+            on_page_done: Optional callback(page_num, cases_so_far) called after each page.
         """
-        logger.info(f"Starting collection for {judge_name}, max_cases={max_cases}")
+        logger.info(f"Starting collection for {judge_name}, max_cases={max_cases}, start_page={start_page}")
 
         court_id = COURT_MAP.get(court_name) if court_name else None
 
-        # Each judge needs a fresh UI search and judge UUID (workers reuse one scraper instance)
         if judge_name:
             self.is_warmed_up = False
             self.last_judge_id = None
 
         all_cases = []
+        pagination = {}
         try:
-            # 1. Initialize Session via UI if not warmed up
             if not getattr(self, "is_warmed_up", False):
                 await self._init_session(
                     self.page,
@@ -465,55 +471,46 @@ class PlaywrightScraper:
             judge_id = self.last_judge_id or await self.get_judge_id(judge_name)
             if judge_name and not judge_id:
                 logger.error("Judge ID missing after UI search; cannot paginate via API")
-                return []
+                return [], {}
 
             html_result = await self.page.content()
-            
-            # Debug: Save Page 1 HTML
-            # with open("debug_page_1.html", "w", encoding="utf-8") as f:
-                # f.write(html_result)
-            # logger.info("Saved Page 1 HTML to debug_page_1.html")
-            
-            # Parse Page 1
+
             cases, pagination = parse_case_list(html_result)
-            logger.info(f"Parsed {len(cases)} cases from Page 1")
-            all_cases.extend(cases)
-            
-            # 2. Pagination Loop (Page 2+)
-            current_page = 2
+            if start_page <= 1:
+                logger.info(f"Parsed {len(cases)} cases from Page 1")
+                all_cases.extend(cases)
+                if on_page_done:
+                    on_page_done(1, len(all_cases))
+            else:
+                logger.info(f"Page 1: used for session warmup only — jumping to page {start_page}")
+
+            # Jump directly to start_page (API accepts any page number)
+            current_page = max(2, start_page)
             while len(all_cases) < max_cases:
-                if len(cases) == 0: # Stop if previous page was empty
-                    break
-                    
-                # Configurable delay between pages
                 logger.info(f"Waiting before Page {current_page}...")
                 await self._delay("between_pages")
-                
-                # Fetch next page
+
                 html_result = await self.fetch_api_page(
                     self.page, court_id, judge_id, current_page, 25
                 )
-                
+
                 if not html_result:
                     logger.warning(f"Failed to fetch page {current_page}")
                     break
-                    
-                # Debug: Save API Page HTML
-                # with open(f"debug_page_{current_page}.html", "w", encoding="utf-8") as f:
-                #     f.write(html_result)
-                    
+
                 cases, _ = parse_case_list(html_result)
                 if not cases:
                     logger.info(f"No more cases found on page {current_page}")
                     break
-                    
+
                 logger.info(f"Parsed {len(cases)} cases from Page {current_page}")
                 all_cases.extend(cases)
-                
+                if on_page_done:
+                    on_page_done(current_page, len(all_cases))
+
                 current_page += 1
-                
-            # Trim to max_cases
-            return all_cases[:max_cases]
+
+            return all_cases[:max_cases], pagination
 
         except JudgeCourtNotFoundError:
             raise
@@ -521,9 +518,9 @@ class PlaywrightScraper:
             logger.error(f"Collection failed: {e}")
             import traceback
             traceback.print_exc()
-            return all_cases
+            return all_cases, pagination
 
-    async def batch_enrich_cases(self, cases: List[CaseBase], batch_size: int = 10, judge_name: str = None, court_name: str = "АС Московского округа") -> None:
+    async def batch_enrich_cases(self, cases: List[CaseBase], batch_size: int = 10, judge_name: str = None, court_name: str = "АС Московского округа", skip_enriched: bool = False) -> None:
         """
         Enrich a batch of cases by fetching and parsing their full case cards.
         Uses a single browser session to minimize overhead and avoid blocks.
@@ -531,12 +528,20 @@ class PlaywrightScraper:
         
         Closed cases get a shallow scrape unless pdf_download_enabled (then always expand).
         When pdf_download_enabled, all instance PDFs are downloaded after parsing.
+
+        Args:
+            skip_enriched: If True, skip cases that already have raw_html set (resume support).
         """
         if not cases:
             return
             
-        # Get just the cases that actually need enrichment and have URLs
         valid_cases = [c for c in cases if getattr(c, 'case_url', None)]
+        if skip_enriched:
+            before = len(valid_cases)
+            valid_cases = [c for c in valid_cases if not getattr(c, 'raw_html', None)]
+            skipped = before - len(valid_cases)
+            if skipped:
+                logger.info(f"Skipped {skipped} already-enriched cases (resume)")
         if not valid_cases:
             logger.info("No cases with URLs to enrich.")
             return

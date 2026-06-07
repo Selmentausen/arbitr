@@ -202,7 +202,7 @@ async def run_test(args: argparse.Namespace) -> None:
             "Collecting up to %d cases for %s...", max_cases, judge.display_name
         )
         try:
-            cases = await scraper.collect_cases(
+            cases, _pagination = await scraper.collect_cases(
                 court_name=court,
                 judge_name=judge.search_name,
                 max_cases=max_cases,

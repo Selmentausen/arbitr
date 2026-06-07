@@ -222,6 +222,27 @@ class ScrapeEventRecord(Base):
         return f"<ScrapeEventRecord(judge={self.judge_name}, status={self.status})>"
 
 
+class JudgeProgressRecord(Base):
+    """Per-judge scraping progress for cross-run resume."""
+
+    __tablename__ = "judge_progress"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    judge_name = Column(String, nullable=False, unique=True, index=True)
+    court = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="pending")  # pending|collecting|enriching|completed|failed
+    cases_collected = Column(Integer, default=0)
+    total_count_at_start = Column(Integer, default=0)
+    max_cases = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<JudgeProgress({self.judge_name}, {self.status}, {self.cases_collected}/{self.max_cases})>"
+
+
 class ScrapeMetaRecord(Base):
     """Single-row table for global scrape dashboard metadata."""
 

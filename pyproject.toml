@@ -3,6 +3,8 @@ scrape = "scrape_to_dashboard:main"
 scrape-parallel = "scrape_parallel:main"
 bandwidth-test = "bandwidth_test:main"
 dashboard = "run_dashboard:main"
+classify = "classify_cases:main"
+classify-eval = "classify_eval:main"
 
 [tool.poetry]
 name = "arbitr"
