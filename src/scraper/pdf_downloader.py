@@ -15,6 +15,7 @@ Metadata tracked via CaseDocument objects on the Case model.
 from __future__ import annotations
 
 import asyncio
+import base64
 import random
 import re
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from typing import Dict, List, Optional, Set
 from urllib.parse import unquote, urljoin, urlparse
 
 import yaml
-from playwright.async_api import Page, Response
+from playwright.async_api import Page, Response, Route
 
 from src.models.case import Case, CaseDocument
 from src.scraper.traffic_tracker import TrafficStats
@@ -222,13 +223,31 @@ async def download_pdfs_for_case(
     if not entries:
         return summary
 
-    to_download = [e for e in entries if e.priority in download_priorities]
-    to_skip = [e for e in entries if e.priority not in download_priorities]
+    high_entries = [e for e in entries if e.priority == "high"]
+    medium_entries = [e for e in entries if e.priority == "medium"]
+    low_entries = [e for e in entries if e.priority == "low"]
+    other_entries = [e for e in entries if e.priority not in ("high", "medium", "low")]
 
+    to_download = []
+    to_skip = []
+    if high_entries:
+        to_download = high_entries
+        to_skip = medium_entries + low_entries + other_entries
+    elif medium_entries:
+        to_download = [medium_entries[0]]
+        to_skip = medium_entries[1:] + low_entries + other_entries
+    elif low_entries:
+        to_download = [low_entries[0]]
+        to_skip = low_entries[1:] + other_entries
+    elif other_entries:
+        to_download = [other_entries[0]]
+        to_skip = other_entries[1:]
+
+    downloaded_priorities = sorted(list(set(e.priority for e in to_download)))
     logger.info(
         "Case %s: %d PDF(s) found — %d to download (%s), %d to skip",
         case.case_number, len(entries), len(to_download),
-        ", ".join(download_priorities), len(to_skip),
+        ", ".join(downloaded_priorities) if downloaded_priorities else "none", len(to_skip),
     )
 
     # Record skipped URLs (medium/low/uncategorized)
@@ -318,6 +337,51 @@ async def _collect_live_pdf_hrefs(page: Page) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Direct JS PDF download via fetch API (optimizes bandwidth)
+# ---------------------------------------------------------------------------
+
+async def _download_via_js_fetch(page: Page, url: str) -> Optional[bytes]:
+    """Execute fetch() directly in browser page context to download PDF bytes."""
+    logger.info("Attempting direct JS fetch for PDF: %s", url)
+    try:
+        # We fetch the URL in page context
+        js_code = """
+        async (url) => {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("HTTP status " + resp.status);
+            }
+            const buf = await resp.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return {
+                base64: btoa(binary),
+                contentType: resp.headers.get("content-type") || ""
+            };
+        }
+        """
+        res = await page.evaluate(js_code, url)
+        if not res or "base64" not in res:
+            logger.info("Direct JS fetch returned empty or invalid payload.")
+            return None
+
+        body = base64.b64decode(res["base64"])
+        if _is_pdf(body):
+            logger.info("Successfully fetched %d bytes of PDF via direct JS fetch.", len(body))
+            return body
+        else:
+            logger.info("JS fetch succeeded but bytes do not start with %%PDF.")
+            return None
+    except Exception as e:
+        logger.info("Direct JS fetch failed: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Single PDF download via response listener
 # ---------------------------------------------------------------------------
 
@@ -330,37 +394,11 @@ async def _download_single_pdf(
 ) -> Optional[tuple[Path, int]]:
     """
     Click a PDF link, let the browser load it naturally, capture the
-    response body via an event listener.  Falls back to Ctrl+S download.
+    response body via an event listener.
 
     Returns (path, size_bytes) or None on failure.
     """
-    captured: dict = {"body": None}
-    popup: Optional[Page] = None
 
-    async def _on_response(response: Response) -> None:
-        """Grab any response that looks like a PDF — don't filter by URL."""
-        if captured["body"] is not None:
-            return
-        ct = response.headers.get("content-type", "")
-        status = response.status
-        logger.debug(
-            "  resp: %s  status=%s  ct=%s",
-            response.url[-70:], status, ct,
-        )
-        if status < 200 or status >= 300:
-            return
-        is_pdf_ct = "pdf" in ct.lower()
-        is_octet = "octet-stream" in ct.lower()
-        if not is_pdf_ct and not is_octet:
-            return
-        try:
-            body = await response.body()
-            logger.debug("  PDF candidate: size=%d  starts=%r", len(body), body[:8])
-            if _is_pdf(body):
-                captured["body"] = body
-                logger.debug("  >>> captured %d bytes of real PDF", len(body))
-        except Exception as exc:
-            logger.debug("  body() failed: %s", exc)
 
     href_tail = urlparse(url).path.split("/")[-1] or "PdfDocument"
     link = page.locator(f'{PDF_LINK_SELECTOR}[href*="{href_tail}"]').first
@@ -368,61 +406,85 @@ async def _download_single_pdf(
         logger.warning("PDF link not on page: %s", url[-80:])
         return None
 
-    page.context.on("response", _on_response)
+    # 2. Programmatic POST Interception Flow
+    logger.info("Initiating POST Interception flow for PDF: %s", url)
+    save_path = storage_dir / (_safe_filename(url) + ".pdf")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    captured = {"body": None, "url": None}
+
+    async def pdf_route_handler(route: Route) -> None:
+        req = route.request
+        if "Document/Pdf" in req.url and req.method == "POST":
+            try:
+                logger.info("Intercepted POST request to: %s", req.url)
+                response = await route.fetch()
+                body = await response.body()
+                if _is_pdf(body):
+                    captured["body"] = body
+                    captured["url"] = req.url
+                    logger.info("PDF captured successfully via POST intercept (%d bytes)!", len(body))
+                    # Fulfill with dummy to prevent browser loading overhead
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/pdf",
+                        body=b"%PDF-1.4 dummy",
+                    )
+                    return
+                else:
+                    logger.warning("POST intercept body did not start with %%PDF: %r", body[:30])
+            except Exception as e:
+                logger.error("Error in PDF route intercept handler: %s", e)
+        await route.continue_()
+
+    # Register context-wide route handler for any Document/Pdf URLs
+    await page.context.route("**/Document/Pdf/**", pdf_route_handler)
+
+    popup: Optional[Page] = None
+    popup_future = asyncio.ensure_future(page.context.wait_for_event("page", timeout=20000))
+
     try:
-        async with page.context.expect_page(timeout=timeout_ms) as page_info:
-            await link.click()
-        popup = await page_info.value
+        logger.info("Clicking PDF link to trigger challenges and POST...")
+        await link.evaluate("node => node.click()")
 
         try:
-            await popup.wait_for_load_state("load", timeout=timeout_ms)
-        except Exception:
-            pass
+            popup = await popup_future
+        except Exception as popup_err:
+            logger.error("Popup page did not open: %s", popup_err)
+            popup_future.cancel()
+            if popup_future.done():
+                try:
+                    popup_future.exception()
+                except Exception:
+                    pass
+            return None
 
-        for _ in range(15):
+        # Poll the captured dict for up to 35 seconds to allow the page to load,
+        # solve DDOS-Guard, and issue the POST request.
+        logger.info("Waiting for PDF POST interception to capture the stream...")
+        for _ in range(70):
             if captured["body"] is not None:
                 break
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
-        if captured["body"] is None:
-            logger.debug("Response listener got nothing, trying Ctrl+S...")
-            save_path = storage_dir / "_tmp_download.pdf"
-            try:
-                await popup.bring_to_front()
-                async with popup.expect_download(timeout=15000) as dl_info:
-                    await popup.keyboard.press("Control+s")
-                download = await dl_info.value
-                await download.save_as(str(save_path))
-                if save_path.exists():
-                    body = save_path.read_bytes()
-                    if _is_pdf(body):
-                        captured["body"] = body
-                    save_path.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.debug("Ctrl+S fallback failed: %s", exc)
-                if save_path.exists():
-                    save_path.unlink(missing_ok=True)
+        if captured["body"] is not None:
+            save_path.write_bytes(captured["body"])
+            return save_path, len(captured["body"])
+            
+        logger.error("Failed to intercept PDF POST request within timeout.")
 
     except Exception as e:
-        logger.debug("Popup open failed for %s: %s", url[-60:], e)
+        logger.error("Interception flow failed: %s", e)
     finally:
-        page.context.remove_listener("response", _on_response)
+        # Always unroute the handler to avoid affecting other navigations
+        try:
+            await page.context.unroute("**/Document/Pdf/**", pdf_route_handler)
+        except Exception:
+            pass
         if popup is not None:
             try:
                 await popup.close()
             except Exception:
                 pass
 
-    body = captured.get("body")
-    if not body or not _is_pdf(body):
-        logger.warning(
-            "No PDF bytes captured for %s (%d bytes received)",
-            url[-60:], len(body) if body else 0,
-        )
-        return None
-
-    fname = _safe_filename(url) + ".pdf"
-    save_path = storage_dir / fname
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    save_path.write_bytes(body)
-    return save_path, len(body)
+    return None

@@ -1,10 +1,12 @@
 [tool.poetry.scripts]
-scrape = "scrape_to_dashboard:main"
-scrape-parallel = "scrape_parallel:main"
-bandwidth-test = "bandwidth_test:main"
-dashboard = "run_dashboard:main"
-classify = "classify_cases:main"
-classify-eval = "classify_eval:main"
+scrape = "src.cli.scrape:main"
+scrape-parallel = "src.cli.scrape_parallel:main"
+bandwidth-test = "src.cli.bandwidth_test:main"
+dashboard = "src.cli.dashboard:main"
+classify = "src.cli.classify:main"
+classify-eval = "src.cli.classify_eval:main"
+test-pdf = "src.cli.test_pdf:main"
+export-ml = "src.cli.export_ml:main"
 
 [tool.poetry]
 name = "arbitr"

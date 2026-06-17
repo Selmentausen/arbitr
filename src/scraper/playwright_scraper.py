@@ -100,6 +100,18 @@ class PlaywrightScraper:
 
             logger.info(f"Playwright proxy enabled: {proxy_host}:{proxy_port}")
 
+        # Bandwidth optimization configuration
+        self.opt_enabled = self.config.get("scraping.bandwidth_optimization.enabled", False)
+        self.opt_block_images = self.config.get("scraping.bandwidth_optimization.block_images", False)
+        self.opt_block_fonts = self.config.get("scraping.bandwidth_optimization.block_fonts", False)
+        self.opt_block_media = self.config.get("scraping.bandwidth_optimization.block_media", False)
+        self.opt_block_stylesheets = self.config.get("scraping.bandwidth_optimization.block_stylesheets", False)
+        self.opt_block_trackers = self.config.get("scraping.bandwidth_optimization.block_trackers", False)
+        self.opt_block_extra_scripts = self.config.get("scraping.bandwidth_optimization.block_extra_scripts", False)
+
+        # Stealth toggle configuration
+        self.stealth_enabled = self.config.get("scraping.stealth_enabled", True)
+
     async def __aenter__(self):
         """Async context manager entry."""
         self.playwright_engine = await async_playwright().start()
@@ -155,12 +167,70 @@ class PlaywrightScraper:
             timezone_id="Europe/Moscow"
         )
         
+        if self.opt_enabled:
+            # Determine blocked resource types
+            blocked_types = set()
+            if self.opt_block_images:
+                blocked_types.add("image")
+            if self.opt_block_fonts:
+                blocked_types.add("font")
+            if self.opt_block_media:
+                blocked_types.add("media")
+            if self.opt_block_stylesheets:
+                blocked_types.add("stylesheet")
+
+            # Determine blocked URL patterns
+            blocked_patterns = []
+            if self.opt_block_trackers:
+                blocked_patterns.extend([
+                    "mc.yandex.ru",
+                    "yandex.ru/metrika",
+                    "google-analytics.com",
+                    "googletagmanager.com",
+                    "top-fwz1.mail.ru",
+                    "mail.ru",
+                ])
+            if self.opt_block_extra_scripts:
+                blocked_patterns.extend([
+                    "video",
+                    "raphael",
+                    "widget",
+                    "android-icon",
+                    "favicon",
+                    ".png",
+                    ".jpg",
+                    ".ico"
+                ])
+
+            async def route_handler(route):
+                req = route.request
+                r_type = req.resource_type
+                url = req.url.lower()
+
+                if r_type in blocked_types:
+                    logger.debug(f"BandwidthOpt: Blocking resource type '{r_type}' for URL: {url}")
+                    await route.abort()
+                    return
+
+                if any(pat in url for pat in blocked_patterns):
+                    logger.debug(f"BandwidthOpt: Blocking URL pattern for URL: {url}")
+                    await route.abort()
+                    return
+
+                await route.continue_()
+
+            await context.route("**/*", route_handler)
+            logger.info("Bandwidth optimization route filters successfully registered on browser context.")
+        
         page = await context.new_page()
         
         # Apply stealth (masks webdriver property, plugins, etc.)
-        # stealth_async is not available in top-level init, need to use Stealth class
-        stealth = Stealth()
-        await stealth.apply_stealth_async(page)
+        if self.stealth_enabled:
+            # stealth_async is not available in top-level init, need to use Stealth class
+            stealth = Stealth()
+            await stealth.apply_stealth_async(page)
+        else:
+            logger.info("Playwright stealth overrides disabled via configuration.")
         
         return browser, context, page
 
@@ -400,7 +470,7 @@ class PlaywrightScraper:
         # Perform UI Search to warm up session
         await self.search_cases_via_ui(page, court, judge_name)
 
-    async def get_case_content(self, case_url: str, judge_name: str = "Солдатов Р. С.") -> str:
+    async def get_case_content(self, case_url: str, judge_name: str = "Титова Е. В.") -> str:
         """
         Fetch full HTML content of a specific case page.
         Requires initializing session via UI search first.
@@ -591,11 +661,17 @@ class PlaywrightScraper:
                                 logger.info(
                                     f"Case {case.case_number} is CLOSED — expanding for PDF download"
                                 )
+                            # Wait for at least one chronology item to render (prevents race condition when CSS/scripts are blocked)
+                            try:
+                                await self.page.wait_for_selector(".b-chrono-item", timeout=10000)
+                            except Exception:
+                                pass
+
                             # Deep scrape: expand instance chronologies
                             collapse_buttons = await self.page.query_selector_all('.b-collapse.js-collapse')
                             for btn in collapse_buttons:
                                 try:
-                                    await btn.click()
+                                    await btn.evaluate("node => node.click()")
                                     await self._delay("between_instance_expand")
                                 except Exception:
                                     pass
@@ -719,7 +795,7 @@ async def main_playwright():
     print("Testing Playwright Stealth Scraper")
     print("=" * 60)
     
-    cases = await scraper.collect_cases(judge_name="Солдатов Р. С.", max_cases=10)
+    cases = await scraper.collect_cases(judge_name="Титова Е. В.", max_cases=10)
     
     print(f"\n✓ Collected {len(cases)} cases")
     if cases:

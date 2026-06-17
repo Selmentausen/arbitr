@@ -4,23 +4,21 @@ Run parallel scrape over configs/dictionaries/judges.txt (or custom file).
 Each worker uses a dedicated residential proxy port when proxy.enabled is true.
 
 Usage:
-    poetry run python scrape_parallel.py
-    poetry run python scrape_parallel.py --workers 5 --max-cases-per-judge 50
-    poetry run python scrape_parallel.py --judges-file configs/dictionaries/judges.txt --headless
+    poetry run scrape-parallel
+    poetry run scrape-parallel --workers 5 --max-cases-per-judge 50
+    poetry run scrape-parallel --judges-file configs/dictionaries/judges.txt --headless
 """
 
 import argparse
 import asyncio
-from pathlib import Path
 
+from src.cli.constants import DB_PATH, CONFIG_PATH
 from src.config.manager import ConfigManager
 from src.scraper.judge_loader import load_judges_from_file
 from src.scraper.runner import ParallelScrapeRunner
 from src.storage.database import init_db
 from src.storage.repository import CaseRepository
 from src.utils.logger import get_logger, setup_logging
-
-DB_PATH = str(Path("data/arbitr.db").absolute())
 
 
 async def _amain(args: argparse.Namespace) -> None:
@@ -144,7 +142,7 @@ def main() -> None:
         help='Court display name (default: АС города Москвы)',
     )
     parser.add_argument("--headless", action="store_true", help="Headless browser")
-    parser.add_argument("--config", type=str, default="configs/main.yaml")
+    parser.add_argument("--config", type=str, default=CONFIG_PATH)
     parser.add_argument(
         "--reset-progress",
         action="store_true",
@@ -159,7 +157,7 @@ def main() -> None:
         "--judge",
         type=str,
         default=None,
-        help='Single judge full name to scrape (e.g. "Солдатов Роман Сергеевич")',
+        help='Single judge full name to scrape (e.g. "Титова Елена Владимировна")',
     )
     parser.add_argument(
         "--reset-judge",

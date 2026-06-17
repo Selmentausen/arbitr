@@ -45,15 +45,30 @@ def sample_config():
 
 @pytest.fixture
 def config_file(sample_config):
-    """Create temporary config file for testing."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+    """Create temporary config file and mock areas for testing."""
+    import shutil
+    temp_dir = Path(tempfile.mkdtemp())
+    config_path = temp_dir / "config.yaml"
+    
+    # Extract areas to write them to the mock areas directory
+    areas_data = sample_config.pop("areas", {})
+    
+    # Write main config
+    with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(sample_config, f)
-        config_path = f.name
+        
+    # Write area configs
+    areas_dir = temp_dir / "areas"
+    areas_dir.mkdir(exist_ok=True)
+    for area_name, area_rules in areas_data.items():
+        area_path = areas_dir / f"{area_name}.yaml"
+        with open(area_path, "w", encoding="utf-8") as f_area:
+            yaml.dump(area_rules, f_area)
+            
+    yield str(config_path)
     
-    yield config_path
-    
-    # Cleanup
-    Path(config_path).unlink()
+    # Cleanup recursively
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestConfigManager:

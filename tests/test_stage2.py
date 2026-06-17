@@ -4,7 +4,7 @@ from src.scraper.playwright_scraper import PlaywrightScraper
 from src.scraper.parser import parse_case_card
 from src.models.case import Case, CaseInstance
 
-async def test_stage2_parsing():
+async def run_stage2_parsing():
     # 1. Setup config and scraper
     config = ConfigManager("configs/main.yaml")
     config._config["scraping"]["proxy"]["enabled"] = False
@@ -15,7 +15,7 @@ async def test_stage2_parsing():
     print(f"Fetching case content from {url}...")
     
     # 2. Get the HTML of the case card 
-    html = await scraper.get_case_content(url, judge_name="Солдатов Р. С.")
+    html = await scraper.get_case_content(url, judge_name="Титова Е. В.")
     print(f"Scraped {len(html)} bytes of HTML. Parsing now...")
     
     # 3. Run the parser we just wrote!
@@ -42,4 +42,4 @@ async def test_stage2_parsing():
             print(f"    Link: {doc.url}")
 
 if __name__ == "__main__":
-    asyncio.run(test_stage2_parsing())
+    asyncio.run(run_stage2_parsing())

@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+from src.cli.constants import DB_PATH, CLASSIFICATION_CONFIG_PATH
 from src.analysis.classifier import apply_classification_to_case, classify_case
 from src.analysis.ollama_client import OllamaError, create_ollama_client
 from src.config.classification import ClassificationConfig
@@ -24,7 +25,6 @@ from src.storage.database import init_db
 from src.storage.repository import CaseRepository
 from src.utils.logger import setup_logging, get_logger
 
-DB_PATH = str(Path("data/arbitr.db").absolute())
 logger = get_logger(__name__)
 
 
@@ -43,7 +43,7 @@ def main() -> int:
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/classification.yaml",
+        default=CLASSIFICATION_CONFIG_PATH,
         help="Path to classification config",
     )
     args = parser.parse_args()
@@ -117,7 +117,7 @@ def main() -> int:
         for case in cases:
             t0 = time.perf_counter()
             try:
-                updated_case, result, _ = classify_case(
+                updated_case, result, prompt = classify_case(
                     case,
                     clf_config,
                     pdf_dir,

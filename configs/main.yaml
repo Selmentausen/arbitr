@@ -46,6 +46,7 @@ linkage_rules:
 # Scraping configuration
 scraping:
   base_url: "https://kad.arbitr.ru"
+  stealth_enabled: true
 
   # Per-action delays (seconds) — tune each independently
   # Higher-risk actions (instance expansion, case page nav) should be slower
@@ -103,6 +104,16 @@ scraping:
   collect_batch_size: 100   # cases to collect before enriching (0 = collect all first)
   max_concurrent: 3
   pdf_storage_dir: data/pdfs
+
+  # Bandwidth / Traffic optimization settings
+  bandwidth_optimization:
+    enabled: true
+    block_images: true
+    block_fonts: true
+    block_media: true
+    block_stylesheets: true
+    block_trackers: true
+    block_extra_scripts: true # video, raphael, support widgets, etc.
 
   # Parallel runner (scrape_parallel.py)
   parallel:

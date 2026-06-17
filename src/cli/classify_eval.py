@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 
+from src.cli.constants import DB_PATH, CLASSIFICATION_CONFIG_PATH
 from src.analysis.classifier import apply_classification_to_case, classify_case
 from src.analysis.ollama_client import OllamaError, create_ollama_client
 from src.config.classification import ClassificationConfig
@@ -21,7 +22,6 @@ from src.storage.database import init_db
 from src.storage.repository import CaseRepository
 from src.utils.logger import setup_logging, get_logger
 
-DB_PATH = str(Path("data/arbitr.db").absolute())
 logger = get_logger(__name__)
 
 
@@ -63,7 +63,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--classification-config",
-        default="configs/classification.yaml",
+        default=CLASSIFICATION_CONFIG_PATH,
         help="Classification config path",
     )
     parser.add_argument("--fast", action="store_true", help="Use fast model")

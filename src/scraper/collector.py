@@ -40,7 +40,7 @@ class CaseCollector:
         Collect cases for a given judge with pagination.
         
         Args:
-            judge_name: Judge name (e.g., "Солдатов Р. С.")
+            judge_name: Judge name (e.g., "Титова Е. В.")
             max_cases: Maximum number of cases to collect
             page_size: Number of cases per page
             save_raw: Whether to save raw HTML responses

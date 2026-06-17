@@ -187,7 +187,7 @@ class KadApiClient:
         Get judge ID by name using autocomplete API.
         
         Args:
-            judge_name: Judge name (e.g., "Солдатов Р. С.")
+            judge_name: Judge name (e.g., "Титова Е. В.")
             
         Returns:
             Judge ID (UUID) or None if not found

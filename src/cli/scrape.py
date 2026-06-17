@@ -8,18 +8,18 @@ End-to-end pipeline:
 4. View in Streamlit dashboard
 
 Usage:
-    poetry run python scrape_to_dashboard.py
-    poetry run python scrape_to_dashboard.py --judge "Солдатов Р. С." --max-cases 25
-    poetry run python scrape_to_dashboard.py --headless  (run browser in background)
+    poetry run scrape
+    poetry run scrape --judge "Титова Е. В." --max-cases 25
+    poetry run scrape --headless  (run browser in background)
 """
 
 import argparse
 import asyncio
 import json
-import sys
 from pathlib import Path
 from datetime import datetime
 
+from src.cli.constants import DB_PATH, CONFIG_PATH
 from src.config.manager import ConfigManager
 from src.scraper.playwright_scraper import JudgeCourtNotFoundError, PlaywrightScraper
 from src.scraper.parser import parse_case_list
@@ -29,15 +29,13 @@ from src.storage.repository import CaseRepository
 from src.models.case import StatusEnum
 from src.utils.logger import setup_logging, get_logger
 
-DB_PATH = str(Path("data/arbitr.db").absolute())
-
 
 async def scrape_and_store(
     judge_name: str = None,
     court: str = "АС города Москвы",
     max_cases: int = 25,
     headless: bool = False,
-    config_path: str = "configs/main.yaml",
+    config_path: str = CONFIG_PATH,
 ):
     """
     Main scraping pipeline.
@@ -168,7 +166,7 @@ async def scrape_and_store(
     print("\n" + "=" * 60)
     print("✅ Pipeline complete!")
     print(f"\nView in dashboard:")
-    print(f"  poetry run streamlit run dashboard/app.py")
+    print(f"  poetry run dashboard")
     print("=" * 60)
     
     repo.close()
@@ -179,7 +177,7 @@ def main():
     parser.add_argument("--judge", type=str, default=None, help="Judge name")
     parser.add_argument("--max-cases", type=int, default=25, help="Max cases to scrape")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
-    parser.add_argument("--config", type=str, default="configs/main.yaml", help="Config path")
+    parser.add_argument("--config", type=str, default=CONFIG_PATH, help="Config path")
     parser.add_argument(
         "--court",
         type=str,

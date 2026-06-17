@@ -134,9 +134,9 @@ def _record_to_case(record: CaseRecord) -> Case:
             CaseParticipant(name=p.name, address=p.address, inn=p.inn, ogrn=p.ogrn, role=role)
         )
 
-        if role == "plaintiff":
+        if role in ("plaintiff", "plaintiffs"):
             plaintiff_names.append(p.name)
-        elif role == "defendant":
+        elif role in ("defendant", "defendants"):
             defendant_names.append(p.name)
 
     # Build instances with documents and updates
