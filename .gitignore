@@ -61,3 +61,8 @@ poetry.lock
 
 # Playwright
 playwright/.local-browsers/
+
+# Old / scratch directories (removed from project)
+scratch/
+test_fleet/
+docs/reference/

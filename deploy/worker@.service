@@ -1,0 +1,19 @@
+[Unit]
+Description=Arbitr Scraper Worker
+After=network.target
+
+[Service]
+Type=simple
+User=arbitr
+WorkingDirectory=/opt/arbitr
+ExecStart=/opt/arbitr/.venv/bin/python -m worker.main
+Environment=ORCHESTRATOR_URL=https://YOUR_CENTRAL_SERVER:8000
+Environment=API_KEY=YOUR_API_KEY
+Environment=WORKER_ID=%H-w${WORKER_SLOT}
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

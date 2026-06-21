@@ -44,6 +44,7 @@ class CaseDocument(BaseModel):
     priority: Optional[str] = None           # "high", "medium", "low", "uncategorized"
     publish_date: Optional[str] = None
     extracted_text: Optional[str] = None     # PDF text (extracted for high-priority docs)
+    storage_key: Optional[str] = None        # MinIO/S3 object key (e.g., "pdfs/{case_id}/{doc_id}.pdf")
 
 
 class InstanceUpdate(BaseModel):

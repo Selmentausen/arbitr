@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, text
 from sqlalchemy.orm import Session, joinedload, subqueryload
 
 from src.models.case import (
@@ -33,11 +33,42 @@ from src.storage.database import (
     CaseParticipantLink,
     ScrapeEventRecord,
     ScrapeMetaRecord,
+    WorkerStatusRecord,
     get_session,
+    is_postgres,
 )
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _serialize_json(data: Any) -> Any:
+    """
+    Serialize data for JSON column storage.
+
+    On PostgreSQL with JSONB columns, pass a native dict/list (the driver handles it).
+    On SQLite with TEXT columns, serialize to a JSON string.
+    """
+    if is_postgres():
+        return data  # JSONB columns accept dicts directly
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _deserialize_json(raw: Any, default: Any = None) -> Any:
+    """
+    Deserialize data from a JSON column.
+
+    On PostgreSQL with JSONB, the driver returns native dicts.
+    On SQLite with TEXT, we need to json.loads() the string.
+    """
+    if raw is None:
+        return default if default is not None else {}
+    if isinstance(raw, (dict, list)):
+        return raw  # Already deserialized (JSONB on PostgreSQL)
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return default if default is not None else {}
 
 
 def _case_to_record(case: Case, session: Session) -> CaseRecord:
@@ -57,8 +88,8 @@ def _case_to_record(case: Case, session: Session) -> CaseRecord:
         category=case.category,
         relevance_score=case.relevance_score,
         status=case.status.value if isinstance(case.status, StatusEnum) else case.status,
-        extracted_data_json=json.dumps(case.extracted_data, ensure_ascii=False),
-        aggregated_metrics_json=json.dumps(case.aggregated_metrics, ensure_ascii=False),
+        extracted_data_json=_serialize_json(case.extracted_data),
+        aggregated_metrics_json=_serialize_json(case.aggregated_metrics),
         raw_html=case.raw_html,
         pdf_texts_json=json.dumps(case.pdf_texts, ensure_ascii=False),
         case_page_scraped=case.case_page_scraped,
@@ -97,6 +128,7 @@ def _case_to_record(case: Case, session: Session) -> CaseRecord:
                     priority=doc.priority,
                     publish_date=doc.publish_date,
                     extracted_text=doc.extracted_text,
+                    storage_key=doc.storage_key,
                     instance=instance_record,
                 )
             )
@@ -152,6 +184,7 @@ def _record_to_case(record: CaseRecord) -> Case:
                 priority=d.priority,
                 publish_date=d.publish_date,
                 extracted_text=d.extracted_text,
+                storage_key=d.storage_key,
             )
             for d in inst.documents
         ]
@@ -210,10 +243,10 @@ def _record_to_case(record: CaseRecord) -> Case:
         category=record.category,
         relevance_score=record.relevance_score,
         status=StatusEnum(record.status) if record.status else StatusEnum.INSUFFICIENT_INFO,
-        extracted_data=json.loads(record.extracted_data_json or "{}"),
-        aggregated_metrics=json.loads(record.aggregated_metrics_json or "{}"),
+        extracted_data=_deserialize_json(record.extracted_data_json, {}),
+        aggregated_metrics=_deserialize_json(record.aggregated_metrics_json, {}),
         raw_html=record.raw_html,
-        pdf_texts=json.loads(record.pdf_texts_json or "[]"),
+        pdf_texts=json.loads(record.pdf_texts_json or "[]") if isinstance(record.pdf_texts_json, str) else (record.pdf_texts_json or []),
     )
 
 
@@ -291,8 +324,8 @@ class CaseRepository:
             existing.category = case.category
             existing.relevance_score = case.relevance_score
             existing.status = case.status.value if isinstance(case.status, StatusEnum) else case.status
-            existing.extracted_data_json = json.dumps(case.extracted_data, ensure_ascii=False)
-            existing.aggregated_metrics_json = json.dumps(case.aggregated_metrics, ensure_ascii=False)
+            existing.extracted_data_json = _serialize_json(case.extracted_data)
+            existing.aggregated_metrics_json = _serialize_json(case.aggregated_metrics)
             existing.raw_html = case.raw_html
             existing.pdf_texts_json = json.dumps(case.pdf_texts, ensure_ascii=False)
             existing.case_page_scraped = case.case_page_scraped
@@ -334,6 +367,7 @@ class CaseRepository:
                         priority=doc.priority,
                         publish_date=doc.publish_date,
                         extracted_text=doc.extracted_text,
+                        storage_key=doc.storage_key,
                         instance=instance_record,
                     )
                     existing.documents.append(doc_record)
@@ -828,13 +862,13 @@ class CaseRepository:
     def start_scrape_event(
         self,
         judge_name: str,
-        worker_id: int,
+        worker_id,
         proxy_port: Optional[int] = None,
         session_id: Optional[str] = None,
     ) -> int:
         rec = ScrapeEventRecord(
             judge_name=judge_name,
-            worker_id=worker_id,
+            worker_id=str(worker_id),
             proxy_port=proxy_port,
             session_id=session_id,
             status="running",
@@ -1269,3 +1303,259 @@ class CaseRepository:
         self.session.commit()
         logger.debug(f"Deleted case {case_id}")
         return True
+
+    # --- Distributed job claiming (for orchestrator) ---
+
+    def claim_next_judge(
+        self,
+        worker_id: str,
+        stale_timeout_minutes: int = 10,
+    ) -> Optional[JudgeProgressRecord]:
+        """
+        Atomically claim the next available judge for a worker.
+
+        Uses FOR UPDATE SKIP LOCKED on PostgreSQL for safe concurrent claiming.
+        Falls back to a simpler transaction on SQLite.
+
+        Prioritizes: pending > failed > stale (heartbeat expired).
+        """
+        now = datetime.utcnow()
+        stale_cutoff = now - timedelta(minutes=stale_timeout_minutes)
+
+        if is_postgres():
+            # PostgreSQL: use FOR UPDATE SKIP LOCKED for atomic claiming
+            result = self.session.execute(
+                text("""
+                    UPDATE judge_progress
+                    SET status = 'collecting',
+                        claimed_by = :worker_id,
+                        heartbeat = :now,
+                        started_at = COALESCE(started_at, :now),
+                        updated_at = :now
+                    WHERE id = (
+                        SELECT id FROM judge_progress
+                        WHERE status IN ('pending', 'failed')
+                           OR (status IN ('collecting', 'enriching')
+                               AND (heartbeat IS NULL OR heartbeat < :stale_cutoff))
+                        ORDER BY
+                            CASE WHEN status = 'pending' THEN 0
+                                 WHEN status = 'failed' THEN 1
+                                 ELSE 2 END,
+                            updated_at ASC NULLS FIRST
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING *
+                """),
+                {"worker_id": worker_id, "now": now, "stale_cutoff": stale_cutoff},
+            )
+            row = result.fetchone()
+            self.session.commit()
+            if row is None:
+                return None
+            # Reload via ORM to get a proper object
+            return self.get_judge_progress(row.judge_name)
+        else:
+            # SQLite fallback: simple query + update in transaction
+            rec = (
+                self.session.query(JudgeProgressRecord)
+                .filter(
+                    or_(
+                        JudgeProgressRecord.status.in_(["pending", "failed"]),
+                        JudgeProgressRecord.status.in_(["collecting", "enriching"])
+                        & (
+                            (JudgeProgressRecord.heartbeat.is_(None))
+                            | (JudgeProgressRecord.heartbeat < stale_cutoff)
+                        ),
+                    )
+                )
+                .order_by(JudgeProgressRecord.updated_at.asc())
+                .first()
+            )
+            if rec is None:
+                return None
+            rec.status = "collecting"
+            rec.claimed_by = worker_id
+            rec.heartbeat = now
+            rec.started_at = rec.started_at or now
+            rec.updated_at = now
+            self.session.commit()
+            return rec
+
+    def update_judge_heartbeat(
+        self,
+        judge_name: str,
+        cases_collected: Optional[int] = None,
+    ) -> None:
+        """Update heartbeat and optionally cases_collected for a claimed judge."""
+        rec = self.get_judge_progress(judge_name)
+        if rec:
+            rec.heartbeat = datetime.utcnow()
+            if cases_collected is not None:
+                rec.cases_collected = cases_collected
+            rec.updated_at = datetime.utcnow()
+            self.session.commit()
+
+    def get_stale_claims(
+        self,
+        stale_timeout_minutes: int = 10,
+    ) -> List[JudgeProgressRecord]:
+        """Find judges with stale heartbeats (worker likely crashed)."""
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=stale_timeout_minutes)
+        return (
+            self.session.query(JudgeProgressRecord)
+            .filter(
+                JudgeProgressRecord.status.in_(["collecting", "enriching"]),
+                or_(
+                    JudgeProgressRecord.heartbeat.is_(None),
+                    JudgeProgressRecord.heartbeat < stale_cutoff,
+                ),
+            )
+            .all()
+        )
+
+    def reclaim_stale_judges(self, stale_timeout_minutes: int = 10) -> int:
+        """Reset stale judges back to pending for re-claiming."""
+        stale = self.get_stale_claims(stale_timeout_minutes)
+        for rec in stale:
+            logger.warning(
+                "Reclaiming stale judge %s (was claimed by %s, last heartbeat %s)",
+                rec.judge_name, rec.claimed_by, rec.heartbeat,
+            )
+            rec.status = "pending"
+            rec.claimed_by = None
+            rec.heartbeat = None
+            rec.retry_count = (rec.retry_count or 0) + 1
+            rec.error_message = f"Reclaimed: stale heartbeat (was {rec.claimed_by})"
+            rec.updated_at = datetime.utcnow()
+        self.session.commit()
+        return len(stale)
+
+    # --- Worker status management ---
+
+    def register_worker(
+        self,
+        worker_id: str,
+        ip_address: Optional[str] = None,
+        vps_id: Optional[str] = None,
+        provider: str = "timeweb",
+        vm_id: Optional[str] = None,
+        proxy_port: Optional[int] = None,
+    ) -> WorkerStatusRecord:
+        """Register a worker or update its registration."""
+        rec = self.session.get(WorkerStatusRecord, worker_id)
+        if rec is None:
+            rec = WorkerStatusRecord(
+                id=worker_id,
+                vps_id=vps_id,
+                ip_address=ip_address,
+                provider=provider,
+                vm_id=vm_id,
+                proxy_port=proxy_port,
+                status="active",
+                last_heartbeat=datetime.utcnow(),
+                registered_at=datetime.utcnow(),
+            )
+            self.session.add(rec)
+        else:
+            rec.ip_address = ip_address or rec.ip_address
+            rec.vps_id = vps_id or rec.vps_id
+            rec.vm_id = vm_id or rec.vm_id
+            rec.proxy_port = proxy_port or rec.proxy_port
+            rec.status = "active"
+            rec.last_heartbeat = datetime.utcnow()
+            rec.blocked_at = None
+        self.session.commit()
+        return rec
+
+    def update_worker_heartbeat(self, worker_id: str) -> bool:
+        """Update worker heartbeat timestamp."""
+        rec = self.session.get(WorkerStatusRecord, worker_id)
+        if rec is None:
+            return False
+        rec.last_heartbeat = datetime.utcnow()
+        self.session.commit()
+        return True
+
+    def mark_worker_blocked(
+        self,
+        worker_id: str,
+        release_judge: bool = True,
+    ) -> Optional[str]:
+        """
+        Mark a worker as blocked. Optionally release its current judge.
+
+        Returns the name of the released judge (if any).
+        """
+        rec = self.session.get(WorkerStatusRecord, worker_id)
+        if rec is None:
+            return None
+
+        rec.status = "blocked"
+        rec.blocked_at = datetime.utcnow()
+        released_judge = rec.current_judge
+
+        if release_judge and released_judge:
+            # Release the judge back to pending
+            judge_rec = self.get_judge_progress(released_judge)
+            if judge_rec and judge_rec.claimed_by == worker_id:
+                judge_rec.status = "pending"
+                judge_rec.claimed_by = None
+                judge_rec.heartbeat = None
+                judge_rec.retry_count = (judge_rec.retry_count or 0) + 1
+                judge_rec.error_message = f"Released: worker {worker_id} reported blocked"
+            rec.current_judge = None
+
+        self.session.commit()
+        return released_judge
+
+    def update_worker_status(
+        self,
+        worker_id: str,
+        status: str,
+        current_judge: Optional[str] = None,
+        ip_address: Optional[str] = None,
+    ) -> bool:
+        """Update worker status and optionally current judge/IP."""
+        rec = self.session.get(WorkerStatusRecord, worker_id)
+        if rec is None:
+            return False
+        rec.status = status
+        if current_judge is not None:
+            rec.current_judge = current_judge
+        if ip_address is not None:
+            rec.ip_address = ip_address
+        rec.last_heartbeat = datetime.utcnow()
+        self.session.commit()
+        return True
+
+    def get_all_workers(self) -> List[WorkerStatusRecord]:
+        """Get all registered workers."""
+        return (
+            self.session.query(WorkerStatusRecord)
+            .order_by(WorkerStatusRecord.id)
+            .all()
+        )
+
+    def get_blocked_workers(self) -> List[WorkerStatusRecord]:
+        """Get all workers currently marked as blocked."""
+        return (
+            self.session.query(WorkerStatusRecord)
+            .filter(WorkerStatusRecord.status == "blocked")
+            .all()
+        )
+
+    def get_stale_workers(self, timeout_minutes: int = 5) -> List[WorkerStatusRecord]:
+        """Get active workers that haven't sent a heartbeat recently."""
+        cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+        return (
+            self.session.query(WorkerStatusRecord)
+            .filter(
+                WorkerStatusRecord.status == "active",
+                or_(
+                    WorkerStatusRecord.last_heartbeat.is_(None),
+                    WorkerStatusRecord.last_heartbeat < cutoff,
+                ),
+            )
+            .all()
+        )
