@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from orchestrator.middleware.auth import verify_api_key
 from orchestrator.models.api_schemas import RotateRequest, StatusResponse, RotationStatus
 from orchestrator.services.rotation_service import RotationService
+from src.scraper.judge_loader import load_judges_from_file
 from src.storage.database import JudgeProgressRecord, get_session
 from src.storage.repository import CaseRepository
 from src.utils.logger import get_logger
@@ -28,9 +29,10 @@ async def seed_judges(
     """
     Seed the judge_progress queue from a judges.txt file.
 
-    Each line = one judge name. Skips duplicates.
+    Each line = one judge full name (e.g. "Титова Екатерина Викторовна").
+    Skips duplicates.
     """
-    path = Path(judges_file or "configs/judges.txt")
+    path = Path(judges_file or "configs/dictionaries/judges.txt")
     if not path.exists():
         raise HTTPException(
             status_code=404, detail=f"Judges file not found: {path}"
@@ -39,14 +41,12 @@ async def seed_judges(
     session = get_session()
     try:
         repo = CaseRepository(session)
-        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        judges = load_judges_from_file(path)
         added = 0
         skipped = 0
 
-        for line in lines:
-            judge_name = line.strip()
-            if not judge_name or judge_name.startswith("#"):
-                continue
+        for entry in judges:
+            judge_name = entry.search_name
 
             existing = repo.get_judge_progress(judge_name)
             if existing:

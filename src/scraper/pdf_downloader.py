@@ -5,8 +5,8 @@ kad.arbitr.ru serves PDFs behind DDOS-Guard. The browser loads them through
 a redirect chain (GIF → 301 → challenge → real PDF). We capture the real
 PDF bytes via a context.on("response") listener.
 
-Priority filtering: only high-priority documents (rulings, expert reports)
-are downloaded. Medium/low/uncategorized are recorded as URLs only.
+Priority filtering: all high priority documents or any one document with highest available are prority downloaded. 
+Everything else is saved as an URL to the pdf file
 
 Storage: flat directory `data/pdfs/` with URL-based filenames.
 Metadata tracked via CaseDocument objects on the Case model.
@@ -334,6 +334,51 @@ async def _collect_live_pdf_hrefs(page: Page) -> List[str]:
             seen.add(url)
             out.append(url)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Direct JS PDF download via fetch API (optimizes bandwidth)
+# ---------------------------------------------------------------------------
+
+async def _download_via_js_fetch(page: Page, url: str) -> Optional[bytes]:
+    """Execute fetch() directly in browser page context to download PDF bytes."""
+    logger.info("Attempting direct JS fetch for PDF: %s", url)
+    try:
+        # We fetch the URL in page context
+        js_code = """
+        async (url) => {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("HTTP status " + resp.status);
+            }
+            const buf = await resp.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return {
+                base64: btoa(binary),
+                contentType: resp.headers.get("content-type") || ""
+            };
+        }
+        """
+        res = await page.evaluate(js_code, url)
+        if not res or "base64" not in res:
+            logger.info("Direct JS fetch returned empty or invalid payload.")
+            return None
+
+        body = base64.b64decode(res["base64"])
+        if _is_pdf(body):
+            logger.info("Successfully fetched %d bytes of PDF via direct JS fetch.", len(body))
+            return body
+        else:
+            logger.info("JS fetch succeeded but bytes do not start with %%PDF.")
+            return None
+    except Exception as e:
+        logger.info("Direct JS fetch failed: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------
