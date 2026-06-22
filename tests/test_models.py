@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.models.case import Case, CaseBase, StatusEnum
+from src.models.case import Case, StatusEnum
 
 
 class TestStatusEnum:
@@ -22,12 +22,12 @@ class TestStatusEnum:
         assert "invalid_status" not in [e.value for e in StatusEnum]
 
 
-class TestCaseBase:
-    """Test cases for CaseBase model."""
+class TestCase:
+    """Test cases for Case model (basic fields)."""
 
     def test_create_valid_case_base(self):
-        """Test creating a valid CaseBase instance."""
-        case = CaseBase(
+        """Test creating a valid Case instance with basic fields."""
+        case = Case(
             id="A40-123456/2024",
             case_number="А40-123456/2024",
             court="Арбитражный суд города Москвы",
@@ -46,8 +46,8 @@ class TestCaseBase:
         assert len(case.third_parties) == 1
 
     def test_case_base_defaults(self):
-        """Test CaseBase with default values."""
-        case = CaseBase(
+        """Test Case with default values."""
+        case = Case(
             id="A40-123456/2024",
             case_number="А40-123456/2024",
             court="Арбитражный суд города Москвы",
@@ -61,7 +61,7 @@ class TestCaseBase:
     def test_case_base_missing_required_fields(self):
         """Test that missing required fields raise ValidationError."""
         with pytest.raises(ValidationError) as exc_info:
-            CaseBase(
+            Case(
                 id="A40-123456/2024",
                 case_number="А40-123456/2024",
                 court="Арбитражный суд города Москвы",
@@ -74,8 +74,8 @@ class TestCaseBase:
         assert "defendant" in field_names
 
     def test_case_base_serialization(self):
-        """Test CaseBase serialization to dict."""
-        case = CaseBase(
+        """Test Case serialization to dict."""
+        case = Case(
             id="A40-123456/2024",
             case_number="А40-123456/2024",
             court="Арбитражный суд города Москвы",
@@ -136,7 +136,7 @@ class TestCase:
         assert case.pdf_texts == []
 
     def test_case_inherits_from_case_base(self):
-        """Test that Case inherits all CaseBase fields."""
+        """Test that Case has all basic fields."""
         case = Case(
             id="A40-123456/2024",
             case_number="А40-123456/2024",
@@ -241,8 +241,8 @@ class TestCase:
         assert "construction" in json_str
 
     def test_case_from_case_base(self):
-        """Test creating Case from CaseBase data."""
-        case_base = CaseBase(
+        """Test creating Case from basic data."""
+        case = Case(
             id="A40-123456/2024",
             case_number="А40-123456/2024",
             court="Арбитражный суд города Москвы",

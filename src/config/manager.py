@@ -12,9 +12,6 @@ logger = logging.getLogger(__name__)
 class ConfigManager:
     """
     Manager for loading and accessing configuration from YAML files.
-    
-    Supports hot-reload for testing and provides convenient access
-    to rules for specific legal areas.
     """
 
     def __init__(self, config_path: Optional[str] = None):
@@ -200,40 +197,3 @@ class ConfigManager:
     def config(self) -> dict[str, Any]:
         """Get full configuration dictionary."""
         return self._config
-
-
-# Convenience functions for direct use
-_global_config: Optional[ConfigManager] = None
-
-
-def load_config(file: str) -> dict[str, Any]:
-    """
-    Load configuration from YAML file (convenience function).
-    
-    Args:
-        file: Path to YAML configuration file
-        
-    Returns:
-        Configuration dictionary
-    """
-    global _global_config
-    _global_config = ConfigManager(file)
-    return _global_config.config
-
-
-def get_rules(area: str) -> dict[str, Any]:
-    """
-    Get rules for specific legal area (convenience function).
-    
-    Args:
-        area: Legal area name
-        
-    Returns:
-        Rules dictionary for the area
-        
-    Raises:
-        RuntimeError: If config not loaded yet
-    """
-    if _global_config is None:
-        raise RuntimeError("Configuration not loaded. Call load_config() first.")
-    return _global_config.get_rules(area)

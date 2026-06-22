@@ -8,7 +8,7 @@ Future stages: HTML analysis, PDF analysis, LLM analysis.
 
 from typing import List, Optional
 
-from src.models.case import Case, CaseBase, StatusEnum
+from src.models.case import Case, StatusEnum
 from src.config.manager import ConfigManager
 from src.filters.stage1_screen import stage1_initial_screen
 from src.utils.logger import get_logger
@@ -46,7 +46,7 @@ class FilterPipeline:
             if c.status in (StatusEnum.UNCERTAIN, StatusEnum.INSUFFICIENT_INFO)
         ]
 
-    def process_case(self, case: CaseBase) -> Case:
+    def process_case(self, case: Case) -> Case:
         """
         Run a single case through the filter pipeline.
 
@@ -98,7 +98,7 @@ class FilterPipeline:
         )
         return result
 
-    def process_batch(self, cases: List[CaseBase]) -> List[Case]:
+    def process_batch(self, cases: List[Case]) -> List[Case]:
         """
         Process a batch of cases through the pipeline.
 

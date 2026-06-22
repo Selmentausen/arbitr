@@ -337,51 +337,6 @@ async def _collect_live_pdf_hrefs(page: Page) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Direct JS PDF download via fetch API (optimizes bandwidth)
-# ---------------------------------------------------------------------------
-
-async def _download_via_js_fetch(page: Page, url: str) -> Optional[bytes]:
-    """Execute fetch() directly in browser page context to download PDF bytes."""
-    logger.info("Attempting direct JS fetch for PDF: %s", url)
-    try:
-        # We fetch the URL in page context
-        js_code = """
-        async (url) => {
-            const resp = await fetch(url);
-            if (!resp.ok) {
-                throw new Error("HTTP status " + resp.status);
-            }
-            const buf = await resp.arrayBuffer();
-            const bytes = new Uint8Array(buf);
-            let binary = '';
-            const len = bytes.byteLength;
-            for (let i = 0; i < len; i++) {
-                binary += String.fromCharCode(bytes[i]);
-            }
-            return {
-                base64: btoa(binary),
-                contentType: resp.headers.get("content-type") || ""
-            };
-        }
-        """
-        res = await page.evaluate(js_code, url)
-        if not res or "base64" not in res:
-            logger.info("Direct JS fetch returned empty or invalid payload.")
-            return None
-
-        body = base64.b64decode(res["base64"])
-        if _is_pdf(body):
-            logger.info("Successfully fetched %d bytes of PDF via direct JS fetch.", len(body))
-            return body
-        else:
-            logger.info("JS fetch succeeded but bytes do not start with %%PDF.")
-            return None
-    except Exception as e:
-        logger.info("Direct JS fetch failed: %s", e)
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Single PDF download via response listener
 # ---------------------------------------------------------------------------
 

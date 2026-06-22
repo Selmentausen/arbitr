@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.models.case import Case, CaseBase, StatusEnum
+from src.models.case import Case, StatusEnum
 from src.config.manager import ConfigManager
 from src.filters.stage1_screen import stage1_initial_screen
 from src.filters.pipeline import FilterPipeline
@@ -78,9 +78,9 @@ def _make_case(
     court: str = "Арбитражный суд",
     judges: list = None,
     case_number: str = "А40-100/2024",
-) -> CaseBase:
+) -> Case:
     """Helper to create test cases."""
-    return CaseBase(
+    return Case(
         id="test-uuid",
         case_number=case_number,
         court=court,

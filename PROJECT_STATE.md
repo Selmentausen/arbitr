@@ -859,5 +859,7 @@ The following files and directories were identified as outdated, unused, or supe
 ### Updated files
 - `src/scraper/__init__.py` — removed `KadApiClient`, `CaseCollector`, `collect_and_save` exports
 - `.gitignore` — added `scratch/`, `test_fleet/`, `docs/reference/`, `.coverage`
+- `configs/main.yaml` — **SECURITY: removed hardcoded proxy credentials** (`username: user356709...`, `password: vk5g2a`). Now reads from `PROXY_USER`, `PROXY_PASS`, `PROXY_HOST` environment variables.
+- `src/scraper/playwright_scraper.py` — added `os` import, proxy credentials now fall back to `PROXY_USER` / `PROXY_PASS` env vars if YAML values are empty.
 
 **Result:** 92 Python files pass `py_compile` syntax check with zero errors.

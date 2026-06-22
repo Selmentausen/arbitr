@@ -9,45 +9,25 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 
 from src.models.case import (
-    CaseBase, CaseParticipant, CaseInstance, CaseDocument,
-    InstanceUpdate, PartyInfo
+    Case, CaseParticipant, CaseInstance, CaseDocument,
+    InstanceUpdate
     )
+from src.scraper.pdf_downloader import classify_priority
 from src.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
 
 
-def parse_judge_suggest(response_data: Dict[str, Any]) -> List[Dict[str, str]]:
+def parse_case_list(html_content: str) -> tuple[List[Case], Dict[str, Any]]:
     """
-    Parse judge autocomplete API response.
-    
-    Args:
-        response_data: JSON response from /Suggest/Judges
-        
-    Returns:
-        List of judge dictionaries with Id, Name, CourtName, etc.
-    """
-    if not response_data.get("Success"):
-        logger.warning("Judge suggest API returned Success=false")
-        return []
-    
-    result = response_data.get("Result", {})
-    items = result.get("Items", [])
-    
-    logger.debug(f"Parsed {len(items)} judge suggestions")
-    return items
-
-
-def parse_case_list(html_content: str) -> tuple[List[CaseBase], Dict[str, Any]]:
-    """
-    Parse HTML table from /Kad/SearchInstances into CaseBase objects.
+    Parse HTML table from /Kad/SearchInstances into Case objects.
     
     Args:
         html_content: HTML response containing case table
         
     Returns:
-        Tuple of (list of CaseBase objects, pagination metadata)
+        Tuple of (list of Case objects, pagination metadata)
     """
     soup = BeautifulSoup(html_content, 'html.parser')
     cases = []
@@ -189,7 +169,6 @@ def parse_case_card(html_content: str) -> Dict[str, Any]:
 
                 # If this update has a PDF, also track it as a document
                 if update.pdf_url:
-                    from src.scraper.pdf_downloader import classify_priority
                     docs.append(CaseDocument(
                         id=item.get('data-id') or None,
                         filename=update.content,
@@ -303,7 +282,7 @@ def _parse_chrono_item(item) -> InstanceUpdate:
     )
 
 
-def _extract_party_info_from_rollover(td_element) -> Optional[PartyInfo]:
+def _extract_party_info_from_rollover(td_element) -> Optional[CaseParticipant]:
     rollover = td_element.find('span', class_='js-rolloverHtml')
     if not rollover:
         return None
@@ -330,11 +309,11 @@ def _extract_party_info_from_rollover(td_element) -> Optional[PartyInfo]:
     if address == "Данные скрыты" or not address:
         address = None
     
-    return PartyInfo(name=name, inn=inn, address=address)
+    return CaseParticipant(name=name, inn=inn, address=address)
 
 
 
-def _extract_case_from_row(row) -> Optional[CaseBase]:
+def _extract_case_from_row(row) -> Optional[Case]:
     """
     Extract case data from a single table row.
     
@@ -342,7 +321,7 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
         row: BeautifulSoup TR element
         
     Returns:
-        CaseBase object or None if row doesn't contain case data
+        Case object or None if row doesn't contain case data
     """
     # Find case number link
     case_link = row.find('a', class_='num_case')
@@ -401,9 +380,9 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
             if info:
                 defendant_info.append(info)
     
-    # Create CaseBase object
+    # Create Case object
     try:
-        case = CaseBase(
+        case = Case(
             id=case_id,
             case_number=case_number,
             court=court_name or "Unknown",
@@ -413,13 +392,11 @@ def _extract_case_from_row(row) -> Optional[CaseBase]:
             filing_date=filing_date,
             case_url=case_url,
             case_type=case_type,
-            plaintiff_info=plaintiff_info,
-            defendant_info=defendant_info,
             scraped_at=datetime.utcnow(),
         )
         return case
     except Exception as e:
-        logger.error(f"Failed to create CaseBase for {case_number}: {e}")
+        logger.error(f"Failed to create Case for {case_number}: {e}")
         return None
 
 
@@ -531,3 +508,29 @@ def _extract_pagination(soup: BeautifulSoup) -> Dict[str, Any]:
         pagination["pages_count"] = int(pages_count_input['value'])
     
     return pagination
+def _extract_party_info_from_rollover(td_element) -> Optional[CaseParticipant]:
+    rollover = td_element.find('span', class_='js-rolloverHtml')
+    if not rollover:
+        return None
+
+    name_link = td_element.find('a')
+    name = name_link.get_text(strip=True) if name_link else None
+    if not name:
+        return None
+
+    inn = None
+    inn_div = rollover.find('div')
+    if inn_div:
+        inn_text = inn_div.get_text(strip=True)
+        inn_match = re.search(r'ИНН:\s*(\d+)', inn_text)
+        if inn_match:
+            inn = inn_match.group(1)
+    
+    rollover_copy = BeautifulSoup(str(rollover), 'html.parser')
+    for tag in rollover_copy.find_all(['strong', 'div']):
+        tag.decompose()
+    address = rollover_copy.get_text(strip=True)
+    if address == "Данные скрыты" or not address:
+        address = None
+    
+    return CaseParticipant(name=name, inn=inn, address=address)

@@ -11,14 +11,14 @@ configured area keywords and judge group mappings to assign:
 import re
 from typing import Dict, List, Optional, Any
 
-from src.models.case import Case, CaseBase, CaseParticipant, StatusEnum
+from src.models.case import Case, CaseParticipant, StatusEnum
 from src.config.manager import ConfigManager
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
+def stage1_initial_screen(case: Case, config: ConfigManager) -> Case:
     """
     Apply initial keyword-based screening to a case.
 
@@ -32,20 +32,16 @@ def stage1_initial_screen(case: CaseBase, config: ConfigManager) -> Case:
     Returns:
         Full Case object with scoring/category applied
     """
-    # Convert CaseBase to Case if needed
-    if isinstance(case, Case):
-        full_case = case
-    else:
-        full_case = Case(**case.model_dump())
-        
-        # Seed the participants dictionary for the database schema
-        if full_case.plaintiff and full_case.plaintiff != "Unknown":
-            full_case.participants["plaintiff"] = [CaseParticipant(name=full_case.plaintiff)]
-            
-        if full_case.defendant and full_case.defendant != "Unknown":
-            for def_name in full_case.defendant.split(", "):
-                if def_name.strip():
-                    full_case.participants.setdefault("defendant", []).append(CaseParticipant(name=def_name.strip()))
+    # Seed the participants dictionary from plaintiff/defendant strings
+    full_case = case
+    if full_case.plaintiff and full_case.plaintiff != "Unknown":
+        full_case.participants["plaintiff"] = [CaseParticipant(name=full_case.plaintiff)]
+    if full_case.defendant and full_case.defendant != "Unknown":
+        for def_name in full_case.defendant.split(", "):
+            if def_name.strip():
+                full_case.participants.setdefault("defendant", []).append(
+                    CaseParticipant(name=def_name.strip())
+                )
 
     # Get all configured areas
     areas = config.get("areas", {})

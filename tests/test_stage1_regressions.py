@@ -6,7 +6,6 @@ import pytest
 
 from src.config.manager import ConfigManager
 from src.filters.stage1_screen import stage1_initial_screen
-from src.models.case import CaseBase
 
 
 @pytest.fixture
@@ -15,8 +14,8 @@ def main_config():
     return ConfigManager(str(root / "configs" / "main.yaml"))
 
 
-def _case(plaintiff: str) -> CaseBase:
-    return CaseBase(
+def _case(plaintiff: str) -> Case:
+    return Case(
         id="test-uuid",
         case_number="А40-100/2024",
         court="Арбитражный суд города Москвы",

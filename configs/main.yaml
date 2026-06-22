@@ -48,6 +48,14 @@ scraping:
   base_url: "https://kad.arbitr.ru"
   stealth_enabled: true
 
+  # Court ID mapping for internal API calls
+  # Key: human-readable court name (must match judge suggest text)
+  # Value: internal API code used in /Kad/SearchInstances
+  courts:
+    АС Московского округа: FASMO
+    АС города Москвы: MSK
+    АС Московской области: ASMO
+
   # Per-action delays (seconds) — tune each independently
   # Higher-risk actions (instance expansion, case page nav) should be slower
   delays:
@@ -133,11 +141,17 @@ scraping:
 
   # Proxy configuration (rotating pool to avoid IP bans)
   # Optional: forced_port (set at runtime by parallel runner; do not set manually unless debugging)
+  # 
+  # SECURITY NOTE: Do not commit real proxy credentials to git.
+  # Set them via environment variables or a separate .env file:
+  #   PROXY_USER=your_username
+  #   PROXY_PASS=your_password
+  # The ConfigManager will read from env vars if values are empty in this file.
   proxy:
     enabled: false
-    host: "pool.proxys.io"
-    username: "user356709o11166r928780"
-    password: "vk5g2a"
+    host: ""
+    username: ""
+    password: ""
     port_range:
       min: 10000
       max: 10999

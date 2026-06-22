@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.config.manager import ConfigManager, get_rules, load_config
+from src.config.manager import ConfigManager
 
 
 @pytest.fixture
@@ -165,31 +165,3 @@ class TestConfigManager:
         manager.reload()
         
         assert manager.get("thresholds.high") == 90
-
-
-class TestConvenienceFunctions:
-    """Test convenience functions."""
-
-    def test_load_config_function(self, config_file):
-        """Test load_config convenience function."""
-        config = load_config(config_file)
-        assert config is not None
-        assert "areas" in config
-
-    def test_get_rules_function(self, config_file):
-        """Test get_rules convenience function."""
-        load_config(config_file)
-        rules = get_rules("construction")
-        assert rules is not None
-        assert "keywords" in rules
-
-    def test_get_rules_without_load(self):
-        """Test get_rules without loading config first."""
-        # Reset global config
-        import src.config.manager as config_module
-        config_module._global_config = None
-        
-        with pytest.raises(RuntimeError) as exc_info:
-            get_rules("construction")
-        
-        assert "not loaded" in str(exc_info.value).lower()

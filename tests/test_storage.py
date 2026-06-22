@@ -3,7 +3,7 @@
 import pytest
 from datetime import datetime
 
-from src.models.case import Case, CaseBase, CaseParticipant, CaseInstance, StatusEnum
+from src.models.case import Case, CaseParticipant, CaseInstance, StatusEnum
 from src.storage.database import init_db, get_session, Base, CaseRecord
 from src.storage.repository import CaseRepository
 
@@ -163,16 +163,16 @@ class TestSaveAndGet:
         assert case.relevance_score == 95.0
         assert case.category == "updated_category"
 
-    def test_save_case_base(self, repo):
-        """Test saving a CaseBase (auto-converts to Case)."""
-        case_base = CaseBase(
+    def test_save_case(self, repo):
+        """Test saving a Case with basic fields."""
+        case = Case(
             id="base-uuid-001",
             case_number="А40-999/2024",
             court="Тест",
             plaintiff="П",
             defendant="О",
         )
-        record = repo.save_case_base(case_base)
+        record = repo.save_case(case_base)
         assert record.id == "base-uuid-001"
 
         case = repo.get_case("base-uuid-001")

@@ -1,5 +1,3 @@
-"""Data models for Arbitr system."""
+from src.models.case import Case, StatusEnum
 
-from .case import Case, CaseBase, StatusEnum
-
-__all__ = ["Case", "CaseBase", "StatusEnum"]
+__all__ = ["Case", "StatusEnum"]

@@ -10,26 +10,23 @@ Features:
 """
 
 import asyncio
+import os
 import random
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Tuple
 from playwright.async_api import async_playwright, Page, BrowserContext
 from playwright_stealth import Stealth
 
-from src.models.case import CaseBase
-from src.scraper.parser import parse_case_list
+from src.models.case import Case
+from src.scraper.parser import parse_case_list, parse_case_card
+from src.scraper.pdf_downloader import download_pdfs_for_case
 from src.utils.logger import get_logger
 from src.config.manager import ConfigManager
 
 
 logger = get_logger(__name__)
-
-COURT_MAP = {
-    "АС Московского округа": "FASMO",
-    "АС города Москвы": "MSK",
-    "АС Московской области": "ASMO",
-}
 
 
 class JudgeCourtNotFoundError(Exception):
@@ -44,7 +41,7 @@ class JudgeCourtNotFoundError(Exception):
 
 
 class PlaywrightScraper:
-    """Scraper using Playwright headless browser for DDOS-Guard bypass."""
+    """Scraper using Playwright for DDOS-Guard bypass."""
     
     def __init__(self, config: ConfigManager, headless: bool = True):
         """
@@ -85,6 +82,15 @@ class PlaywrightScraper:
             proxy_host = config.get("scraping.proxy.host")
             proxy_user = config.get("scraping.proxy.username")
             proxy_pass = config.get("scraping.proxy.password")
+            
+            # Fallback to environment variables for proxy credentials
+            if not proxy_user:
+                proxy_user = os.environ.get("PROXY_USER")
+            if not proxy_pass:
+                proxy_pass = os.environ.get("PROXY_PASS")
+            if not proxy_host:
+                proxy_host = os.environ.get("PROXY_HOST", "pool.proxys.io")
+            
             port_min = config.get("scraping.proxy.port_range.min", 10000)
             port_max = config.get("scraping.proxy.port_range.max", 10999)
             forced = config.get("scraping.proxy.forced_port")
@@ -224,7 +230,6 @@ class PlaywrightScraper:
         
         page = await context.new_page()
         
-        # Apply stealth (masks webdriver property, plugins, etc.)
         if self.stealth_enabled:
             # stealth_async is not available in top-level init, need to use Stealth class
             stealth = Stealth()
@@ -235,7 +240,6 @@ class PlaywrightScraper:
         return browser, context, page
 
     async def get_judge_id(self, judge_name: str) -> Optional[str]:
-        """Return judge UUID captured during UI autocomplete (pagination API)."""
         return self.last_judge_id
 
     async def _select_judge_autocomplete(self, page: Page, text_to_type: str) -> Optional[str]:
@@ -254,7 +258,6 @@ class PlaywrightScraper:
         )
         logger.info("Filled judge name for suggest")
         await self._delay("autocomplete_wait")
-        # Extra fixed wait for flaky suggest list rendering.
         await page.wait_for_timeout(2000)
         try:
             await page.wait_for_selector(
@@ -301,7 +304,6 @@ class PlaywrightScraper:
         surname = short_label.split()[0] if short_label else text_to_type.split()[0]
 
         try:
-            # Ensure key presses go to judge input's suggest list.
             await page.click(judge_input_selector)
             for _ in range(target_index):
                 await page.keyboard.press("ArrowDown")
@@ -331,7 +333,7 @@ class PlaywrightScraper:
         """
         logger.info(f"Performing UI search for judge '{judge_name}'...")
 
-        # 1. Fill Judge Name
+        # Fill Judge Name
         if judge_name:
             try:
                 chosen = await self._select_judge_autocomplete(page, judge_name)
@@ -361,10 +363,9 @@ class PlaywrightScraper:
             logger.error("No court name or judge name provided")
             raise
 
-        # 2. Click Search Button
+        # Click Search Button
         search_button_selector = '#b-form-submit button'
         try:
-            # Mouse move to button for realism
             button = await page.query_selector(search_button_selector)
             if button:
                 box = await button.bounding_box()
@@ -378,10 +379,8 @@ class PlaywrightScraper:
             logger.error(f"Failed to click search button: {e}")
             raise
         
-        # 3. Wait for Results
         logger.info("Waiting for search results...")
         try:
-            # Wait for network idle which usually indicates search finished
             await page.wait_for_load_state("networkidle", timeout=30000)
             await self._delay("after_search_results")
         except Exception as e:
@@ -435,8 +434,7 @@ class PlaywrightScraper:
             }}
         """)
         
-        # Wait for result
-        for _ in range(20): # 10 seconds max
+        for _ in range(20):
             result = await page.evaluate("window.__searchResults")
             error = await page.evaluate("window.__searchError")
             if result or error:
@@ -509,19 +507,18 @@ class PlaywrightScraper:
         max_cases: int = 100,
         start_page: int = 1,
         on_page_done: callable = None,
-    ) -> tuple[List[CaseBase], dict]:
+    ) -> tuple[List[Case], dict]:
         """
         Main collection method.
         Returns (cases, pagination) where pagination contains total_count from the site.
 
         Args:
             start_page: Page to begin collecting from (1 = first page).
-                        Pages before start_page are fetched for session warmup but discarded.
             on_page_done: Optional callback(page_num, cases_so_far) called after each page.
         """
         logger.info(f"Starting collection for {judge_name}, max_cases={max_cases}, start_page={start_page}")
 
-        court_id = COURT_MAP.get(court_name) if court_name else None
+        court_id = self.config.get(f"scraping.courts.{court_name}") if court_name else None
 
         if judge_name:
             self.is_warmed_up = False
@@ -554,7 +551,6 @@ class PlaywrightScraper:
             else:
                 logger.info(f"Page 1: used for session warmup only — jumping to page {start_page}")
 
-            # Jump directly to start_page (API accepts any page number)
             current_page = max(2, start_page)
             while len(all_cases) < max_cases:
                 logger.info(f"Waiting before Page {current_page}...")
@@ -590,10 +586,9 @@ class PlaywrightScraper:
             traceback.print_exc()
             return all_cases, pagination
 
-    async def batch_enrich_cases(self, cases: List[CaseBase], batch_size: int = 10, judge_name: str = None, court_name: str = "АС Московского округа", skip_enriched: bool = False) -> None:
+    async def batch_enrich_cases(self, cases: List[Case], batch_size: int = 10, judge_name: str = None, court_name: str = "АС Московского округа", skip_enriched: bool = True) -> None:
         """
         Enrich a batch of cases by fetching and parsing their full case cards.
-        Uses a single browser session to minimize overhead and avoid blocks.
         Updates the Case objects in place.
         
         Closed cases get a shallow scrape unless pdf_download_enabled (then always expand).
@@ -616,7 +611,6 @@ class PlaywrightScraper:
             logger.info("No cases with URLs to enrich.")
             return
 
-        # Load closed-case indicators from config file
         closed_indicators = self._load_closed_case_indicators()
         logger.info(f"Loaded {len(closed_indicators)} closed-case indicator patterns")
 
@@ -624,25 +618,20 @@ class PlaywrightScraper:
         logger.info(f"Starting batch enrichment for {len(valid_cases)} cases (batch_size={batch_size})")
 
         try:
-            # Initialize session once to clear DDOS-Guard
             if not getattr(self, 'is_warmed_up', False):
                 await self._init_session(self.page, court_name, judge_name)
                 self.is_warmed_up = True
             
-            from src.scraper.parser import parse_case_card
-                
             for i in range(0, len(valid_cases), batch_size):
                 batch = valid_cases[i:i + batch_size]
                 logger.info(f"Processing enrichment batch {i//batch_size + 1} ({len(batch)} cases)")
                 
-                # Delay between batches (except before the first)
                 if i > 0:
                     await self._delay("between_batches")
                 
                 for case in batch:
                     logger.info(f"Fetching case card: {case.case_url}")
                     try:
-                        # Configurable delay before navigating to case page
                         await self._delay("before_case_page")
                         
                         await self.page.goto(case.case_url, wait_until="domcontentloaded", timeout=60000)
@@ -661,13 +650,11 @@ class PlaywrightScraper:
                                 logger.info(
                                     f"Case {case.case_number} is CLOSED — expanding for PDF download"
                                 )
-                            # Wait for at least one chronology item to render (prevents race condition when CSS/scripts are blocked)
                             try:
                                 await self.page.wait_for_selector(".b-chrono-item", timeout=10000)
                             except Exception:
                                 pass
 
-                            # Deep scrape: expand instance chronologies
                             collapse_buttons = await self.page.query_selector_all('.b-collapse.js-collapse')
                             for btn in collapse_buttons:
                                 try:
@@ -681,10 +668,9 @@ class PlaywrightScraper:
 
                         html_content = await self.page.content()
                         
-                        # Parse detailed card
                         card_data = parse_case_card(html_content)
                         
-                        # Update case object in-place
+                        # Update case object
                         if hasattr(case, 'raw_html'):
                             case.raw_html = html_content
                         
@@ -693,31 +679,21 @@ class PlaywrightScraper:
                             
                         if hasattr(case, 'extracted_data'):
                             case.extracted_data.update(card_data.get("extracted_data", {}))
-                            # Mark scrape depth
                             case.extracted_data["scrape_depth"] = (
                                 "shallow" if shallow_only else "deep"
                             )
                         
-                        if hasattr(case, 'participants') and card_data.get("participants"):
+                        if card_data.get("participants"):
                             case.participants = card_data["participants"]
                         
-                        # New case-level metadata
-                        if hasattr(case, 'case_status_text'):
-                            case.case_status_text = card_data.get("case_status_text")
-                        if hasattr(case, 'case_category_text'):
-                            case.case_category_text = card_data.get("case_category_text")
-                        if hasattr(case, 'claim_amount') and card_data.get("claim_amount"):
+                        case.case_status_text = card_data.get("case_status_text")
+                        case.case_category_text = card_data.get("case_category_text")
+                        if card_data.get("claim_amount"):
                             case.claim_amount = card_data["claim_amount"]
-                        if hasattr(case, 'case_page_scraped'):
-                            case.case_page_scraped = True
-                        if hasattr(case, 'last_scraped_at'):
-                            case.last_scraped_at = datetime.utcnow()
+                        case.case_page_scraped = True
+                        case.last_scraped_at = datetime.utcnow()
                             
-                        if pdf_download_enabled and hasattr(case, "instances"):
-                            from pathlib import Path
-
-                            from src.scraper.pdf_downloader import download_pdfs_for_case
-
+                        if pdf_download_enabled:
                             pdf_root = Path(
                                 self.config.get("scraping.pdf_storage_dir", "data/pdfs")
                             )
@@ -742,7 +718,6 @@ class PlaywrightScraper:
 
     def _load_closed_case_indicators(self) -> List[str]:
         """Load closed-case indicator patterns from config file."""
-        from pathlib import Path
         indicators_path = Path("configs/dictionaries/closed_case_indicators.txt")
         if not indicators_path.exists():
             logger.warning(f"Closed-case indicators file not found: {indicators_path}")
