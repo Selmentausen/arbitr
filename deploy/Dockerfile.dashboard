@@ -1,0 +1,52 @@
+# Build stage: install dependencies
+FROM python:3.12-slim-bookworm AS builder
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry
+RUN pip install --no-cache-dir poetry==1.8.5
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock ./
+
+# Configure poetry: don't create virtualenv in container, don't install root package
+RUN poetry config virtualenvs.create false \
+    && poetry install --no-interaction --no-ansi --no-root --only main
+
+# --- Final stage ---
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed Python packages from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY scripts/ ./scripts/
+COPY src/ ./src/
+COPY orchestrator/ ./orchestrator/
+COPY configs/ ./configs/
+COPY dashboard/ ./dashboard/
+COPY worker/ ./worker/
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8501
+
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+
+# Run the Streamlit dashboard
+CMD ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]

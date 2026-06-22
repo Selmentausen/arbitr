@@ -1,32 +1,23 @@
 version: '3.8'
 
 services:
-  # PostgreSQL is Managed by Timeweb — NOT in this compose file
-  # Connection via DATABASE_URL env var
-
-  # PgBouncer — connection pooler for PostgreSQL
-  pgbouncer:
-    image: bitnami/pgbouncer:latest
-    container_name: arbitr-pgbouncer
+  # PostgreSQL — database for the orchestrator
+  postgres:
+    image: postgres:16-alpine
+    container_name: arbitr-postgres
     environment:
-      - PGBOUNCER_DATABASE=${PG_DATABASE:-arbitr}
-      - PGBOUNCER_AUTH_TYPE=md5
-      - POSTGRESQL_HOST=${PG_HOST}
-      - POSTGRESQL_PORT=${PG_PORT:-5432}
-      - POSTGRESQL_USERNAME=${PG_USER:-arbitr}
-      - POSTGRESQL_PASSWORD=${PG_PASSWORD}
-      - PGBOUNCER_POOL_MODE=transaction
-      - PGBOUNCER_MAX_CLIENT_CONN=200
-      - PGBOUNCER_DEFAULT_POOL_SIZE=30
-      - PGBOUNCER_MIN_POOL_SIZE=5
-      - PGBOUNCER_SERVER_IDLE_TIMEOUT=300
+      POSTGRES_USER: ${PG_USER:-arbitr}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-arbitr}
+      POSTGRES_DB: ${PG_DATABASE:-arbitr}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     ports:
-      - "6432:6432"
+      - "5432:5432"
     networks:
       - arbitr-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-arbitr} -d ${PG_DATABASE:-arbitr}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -35,8 +26,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: arbitr-redis
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     networks:
@@ -48,19 +37,19 @@ services:
       timeout: 5s
       retries: 5
 
-  # MinIO — S3-compatible object storage for PDFs
+  # MinIO — S3-compatible object storage for PDFs (optional)
   minio:
     image: minio/minio:latest
     container_name: arbitr-minio
     command: server /data --console-address ":9001"
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-arbitr-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-arbitr-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minio-secret}
     volumes:
       - minio_data:/data
     ports:
       - "9000:9000"   # S3 API
-      - "9001:9001"   # MinIO Console (web UI)
+      - "9001:9001"   # MinIO Console
     networks:
       - arbitr-network
     restart: unless-stopped
@@ -77,31 +66,32 @@ services:
       dockerfile: deploy/Dockerfile.orchestrator
     container_name: arbitr-orchestrator
     environment:
-      # Connect via PgBouncer, not directly to PG
-      - DATABASE_URL=postgresql+psycopg2://${PG_USER:-arbitr}:${PG_PASSWORD}@pgbouncer:6432/${PG_DATABASE:-arbitr}
-      - REDIS_URL=redis://redis:6379
-      # S3 / Object Storage
-      - S3_ENDPOINT=${S3_ENDPOINT}
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
-      - S3_SECRET_KEY=${S3_SECRET_KEY}
-      - S3_BUCKET=${S3_BUCKET:-arbitr-pdfs}
-      - S3_REGION=${S3_REGION:-ru-1}
-      - S3_SECURE=${S3_SECURE:-true}
-      # MinIO (fallback if S3 not configured)
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-arbitr-admin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
-      - API_KEY=${API_KEY}
-      - TIMEWEB_API_TOKEN=${TIMEWEB_API_TOKEN}
-      # Rotation rate limits
-      - ROTATION_MAX_PER_HOUR=${ROTATION_MAX_PER_HOUR:-3}
-      - ROTATION_MAX_PER_DAY=${ROTATION_MAX_PER_DAY:-10}
-      - ROTATION_COOLDOWN_MINUTES=${ROTATION_COOLDOWN_MINUTES:-15}
-      - ROTATION_COMMAND_EXPIRY_MINUTES=${ROTATION_COMMAND_EXPIRY_MINUTES:-30}
+      DATABASE_URL: postgresql+psycopg2://${PG_USER:-arbitr}:${PG_PASSWORD:-arbitr}@postgres:5432/${PG_DATABASE:-arbitr}
+      REDIS_URL: redis://redis:6379
+      # S3 / Object Storage (leave empty to use MinIO fallback)
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-arbitr-pdfs}
+      S3_REGION: ${S3_REGION:-ru-1}
+      S3_SECURE: ${S3_SECURE:-true}
+      # MinIO fallback
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-arbitr-admin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minio-secret}
+      # Auth
+      API_KEY: ${API_KEY:-dev-key-change-me}
+      # Timeweb (leave empty to disable rotation)
+      TIMEWEB_API_TOKEN: ${TIMEWEB_API_TOKEN:-}
+      # Rotation limits
+      ROTATION_MAX_PER_HOUR: ${ROTATION_MAX_PER_HOUR:-3}
+      ROTATION_MAX_PER_DAY: ${ROTATION_MAX_PER_DAY:-10}
+      ROTATION_COOLDOWN_MINUTES: ${ROTATION_COOLDOWN_MINUTES:-15}
+      ROTATION_COMMAND_EXPIRY_MINUTES: ${ROTATION_COMMAND_EXPIRY_MINUTES:-30}
     ports:
       - "8000:8000"
     depends_on:
-      pgbouncer:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -118,21 +108,44 @@ services:
       dockerfile: deploy/Dockerfile.dashboard
     container_name: arbitr-dashboard
     environment:
-      - DATABASE_URL=postgresql+psycopg2://${PG_USER:-arbitr}:${PG_PASSWORD}@pgbouncer:6432/${PG_DATABASE:-arbitr}
-      - ORCHESTRATOR_URL=http://orchestrator:8000
+      DATABASE_URL: postgresql+psycopg2://${PG_USER:-arbitr}:${PG_PASSWORD:-arbitr}@postgres:5432/${PG_DATABASE:-arbitr}
+      ORCHESTRATOR_URL: http://orchestrator:8000
     ports:
       - "8501:8501"
     depends_on:
-      pgbouncer:
-        condition: service_healthy
+      - orchestrator
     networks:
       - arbitr-network
     restart: unless-stopped
+
+  # Worker (for testing on the same server — disable in production)
+  # worker:
+  #   build:
+  #     context: ..
+  #     dockerfile: deploy/Dockerfile.worker
+  #   container_name: arbitr-worker
+  #   environment:
+  #     WORKER_ID: worker-compose-1
+  #     VPS_ID: vps-compose
+  #     ORCHESTRATOR_URL: http://orchestrator:8000
+  #     API_KEY: ${API_KEY:-dev-key-change-me}
+  #     PROXY_PORT: ""
+  #     PROXY_BIND_IP: ""
+  #     HEARTBEAT_INTERVAL: 30
+  #     POLL_INTERVAL: 60
+  #     CONFIG_PATH: configs/main.yaml
+  #     NO_STEALTH: "false"
+  #   depends_on:
+  #     - orchestrator
+  #   networks:
+  #     - arbitr-network
+  #   restart: unless-stopped
 
 networks:
   arbitr-network:
     driver: bridge
 
 volumes:
+  postgres_data:
   redis_data:
   minio_data:

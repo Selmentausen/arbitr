@@ -1,0 +1,63 @@
+# Build stage: install dependencies
+FROM python:3.12-slim-bookworm AS builder
+
+WORKDIR /app
+
+# Install system dependencies for building + Playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry
+RUN pip install --no-cache-dir poetry==1.8.5
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock ./
+
+# Configure poetry: don't create virtualenv in container, don't install root package
+RUN poetry config virtualenvs.create false \
+    && poetry install --no-interaction --no-ansi --no-root --only main
+
+# --- Final stage ---
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+# Install runtime dependencies + Playwright browser deps
+# See: https://playwright.dev/python/docs/docker
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libatspi2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed Python packages from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Install Playwright browsers (Chromium only, headless)
+RUN playwright install chromium
+RUN playwright install-deps chromium
+
+# Copy application code
+COPY scripts/ ./scripts/
+COPY src/ ./src/
+COPY worker/ ./worker/
+COPY configs/ ./configs/
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Run the worker
+CMD ["python", "-m", "worker.main"]

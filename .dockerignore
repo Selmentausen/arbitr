@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Poetry
+poetry.lock
+# Actually we need poetry.lock in Docker, so don't ignore it
+# But ignore local virtualenv
+.venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Data / logs
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Tests
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation
+docs/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Docker (avoid recursion)
+.dockerignore
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Misc
+.DS_Store
+*.log
