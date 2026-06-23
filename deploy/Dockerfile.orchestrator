@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir poetry==1.8.5
 # Copy dependency files
 COPY pyproject.toml poetry.lock ./
 
-# Configure poetry: don't create virtualenv in container, don't install root package
+# Regenerate lock file if pyproject.toml changed, then install
 RUN poetry config virtualenvs.create false \
+    && poetry lock --no-update \
     && poetry install --no-interaction --no-ansi --no-root --only main
 
 # --- Final stage ---

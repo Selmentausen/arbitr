@@ -12,7 +12,6 @@ from orchestrator.middleware.auth import verify_api_key
 from orchestrator.models.api_schemas import (
     StatusResponse,
     WorkerBlockedRequest,
-    WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
     WorkerRegisterRequest,
     WorkerStatusResponse,
@@ -65,7 +64,6 @@ async def register_worker(
 async def worker_heartbeat(
     worker_id: str,
     request: Request,
-    _body: WorkerHeartbeatRequest = WorkerHeartbeatRequest(),
     _: str = Depends(verify_api_key),
 ):
     """

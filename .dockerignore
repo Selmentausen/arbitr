@@ -13,10 +13,6 @@ venv/
 ENV/
 env/
 
-# Poetry
-poetry.lock
-# Actually we need poetry.lock in Docker, so don't ignore it
-# But ignore local virtualenv
 .venv
 
 # IDE
