@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # PostgreSQL — database for the orchestrator
   postgres:
@@ -19,6 +21,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   # Redis — pub/sub for live dashboard, caching
   redis:
@@ -34,6 +37,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   # MinIO — S3-compatible object storage for PDFs (optional)
   minio:
@@ -52,10 +56,11 @@ services:
       - arbitr-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/minio/health/live || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
   # FastAPI Orchestrator
   orchestrator:
@@ -93,8 +98,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
     networks:
       - arbitr-network
     restart: unless-stopped
@@ -125,7 +128,7 @@ services:
   #   environment:
   #     WORKER_ID: worker-compose-1
   #     VPS_ID: vps-compose
-   #     ORCHESTRATOR_URL: http://orchestrator:8000
+  #     ORCHESTRATOR_URL: http://orchestrator:8000
   #     API_KEY: ${API_KEY:-dev-key-change-me}
   #     PROXY_PORT: ""
   #     PROXY_BIND_IP: ""
