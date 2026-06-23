@@ -16,10 +16,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.scraper.judge_loader import load_judges_from_file
-from src.storage.database import get_session, JudgeProgressRecord
+from src.storage.database import init_db, get_session, JudgeProgressRecord
 
 
 def main():
+    init_db()
     judges_file = os.environ.get("JUDGES_FILE", "configs/dictionaries/judges.txt")
     judges = load_judges_from_file(judges_file)
 
