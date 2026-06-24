@@ -41,7 +41,7 @@ class WorkerConfig:
         )
     )
     api_key: str = field(
-        default_factory=lambda: os.environ.get("API_KEY", "dev-key-change-me")
+        default_factory=lambda: os.environ.get("API_KEY", "CHANGE_ME_TO_A_LONG_RANDOM_STRING_32_CHARS_MIN")
     )
 
     # Proxy / IP binding
@@ -94,3 +94,8 @@ class WorkerConfig:
             f"orchestrator_url={self.orchestrator_url}, "
             f"proxy={self.proxy_bind_ip}:{self.proxy_port})"
         )
+
+    @classmethod
+    def from_env(cls) -> "WorkerConfig":
+        """Create configuration from environment variables."""
+        return cls()

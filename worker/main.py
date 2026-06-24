@@ -9,22 +9,19 @@ What it does:
   3. Registers with the FastAPI orchestrator
   4. Runs a heartbeat loop in the background
   5. Claims judges, scrapes them, sends results to the orchestrator
-  6. Uploads PDFs directly to S3 via presigned URLs (orchestrator never sees bytes)
-  7. Detects blocks, reports them, and waits for the orchestrator to command IP rotation
+  6. Detects blocks, reports them, and waits for the orchestrator to command IP rotation
 
 No database access. No cloud credentials. No local state.
 """
 import asyncio
-import os
 import signal
 import sys
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from worker.config import WorkerConfig
 from worker.client import OrchestratorClient
 from worker.proxy import ProxyManager
 from worker.scraper import WorkerScraper
-from worker.models import ScrapeResult
 
 from src.config.manager import ConfigManager
 from src.utils.logger import get_logger
@@ -111,59 +108,6 @@ async def _execute_command(
     client.clear_command()
 
 
-async def _upload_pdfs(
-    client: OrchestratorClient,
-    result: ScrapeResult,
-    upload_urls: dict,
-) -> list[dict]:
-    """
-    Upload PDFs directly to S3 using presigned URLs.
-    Returns confirmations for successfully uploaded files.
-    """
-    confirmations = []
-    failed = 0
-
-    for pdf in result.pdfs:
-        if not pdf.bytes:
-            continue
-
-        case_urls = upload_urls.get(pdf.case_id, {})
-        presigned_url = case_urls.get(pdf.doc_id or pdf.filename)
-
-        if not presigned_url:
-            logger.warning(
-                "No presigned URL for PDF %s (case %s)",
-                pdf.filename,
-                pdf.case_id,
-            )
-            failed += 1
-            continue
-
-        success = await client.upload_pdf_to_s3(
-            presigned_url, pdf.bytes
-        )
-        if success:
-            confirmations.append(
-                {
-                    "case_id": pdf.case_id,
-                    "doc_id": pdf.doc_id,
-                    "filename": pdf.filename,
-                    "size_bytes": len(pdf.bytes),
-                    "ok": True,
-                }
-            )
-        else:
-            logger.error("Failed to upload PDF %s to S3", pdf.filename)
-            failed += 1
-
-    logger.info(
-        "PDF uploads: %d successful, %d failed",
-        len(confirmations),
-        failed,
-    )
-    return confirmations
-
-
 async def _wait_for_rotation(
     client: OrchestratorClient,
     proxy: Optional[ProxyManager],
@@ -213,7 +157,6 @@ async def run_worker():
         vps_id=config.vps_id,
         max_retries=config.max_retries,
         base_delay=config.retry_base_delay,
-        s3_timeout=config.s3_upload_timeout,
     )
 
     proxy: Optional[ProxyManager] = None
@@ -278,12 +221,43 @@ async def run_worker():
             current_job = job
             logger.info("Claimed judge: %s", judge_name)
 
-            # Scrape
+            # Incremental submission callback — called after each batch
+            async def _submit_batch(
+                jname: str,
+                batch_dicts: List[Dict],
+                total_so_far: int,
+            ) -> None:
+                logger.info(
+                    "Submitting batch of %d cases for %s "
+                    "(total so far: %d)",
+                    len(batch_dicts),
+                    jname,
+                    total_so_far,
+                )
+                try:
+                    await client.submit_cases(
+                        judge_name=jname,
+                        cases=batch_dicts,
+                        documents=[],
+                    )
+                    await client.update_progress(
+                        jname, cases_collected=total_so_far
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Batch submission failed: %s", e
+                    )
+
+            # Scrape with resume info + incremental submission
             result = await scraper.scrape_judge(
                 judge_name=judge_name,
                 proxy_port=config.proxy_port,
                 proxy_bind_ip=config.proxy_bind_ip,
                 stop_event=_stop_event,
+                prev_collected=job.get("cases_collected", 0),
+                prev_total=job.get("total_count_at_start", 0),
+                max_cases=job.get("max_cases", 0),
+                on_batch_ready=_submit_batch,
             )
 
             # Handle block
@@ -293,6 +267,7 @@ async def run_worker():
                     judge_name,
                     result.block_reason,
                 )
+                # Cases already submitted incrementally — just report block
                 try:
                     await client.report_blocked(result.block_reason)
                 except Exception as e:
@@ -326,65 +301,27 @@ async def run_worker():
                 await asyncio.sleep(10)
                 continue
 
-            # Submit cases (metadata + extracted text)
-            logger.info(
-                "Submitting %d cases for judge %s",
-                len(result.cases),
-                judge_name,
-            )
+            # All batches already submitted — just mark complete
             try:
-                # Build documents list for presigned URL generation
-                documents = [
-                    {
-                        "case_id": pdf.case_id,
-                        "doc_id": pdf.doc_id,
-                        "filename": pdf.filename,
-                        "url": pdf.url,
-                    }
-                    for pdf in result.pdfs
-                    if pdf.bytes is not None
-                ]
-
-                response = await client.submit_cases(
-                    judge_name=judge_name,
-                    cases=result.cases,
-                    documents=documents,
+                await client.complete_job(
+                    judge_name, result.cases_after_filter
                 )
-
-                # Upload PDFs directly to S3
-                upload_urls = response.get("upload_urls", {})
-                if upload_urls and result.pdfs:
-                    confirmations = await _upload_pdfs(
-                        client, result, upload_urls
-                    )
-                    if confirmations:
-                        try:
-                            await client.confirm_uploads(
-                                judge_name=judge_name,
-                                uploads=confirmations,
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "Upload confirmation failed: %s", e
-                            )
-
-                # Mark job complete
-                await client.complete_job(judge_name, len(result.cases))
                 logger.info(
-                    "Judge %s completed: %d cases, %d PDFs",
+                    "Judge %s completed: %d cases submitted",
                     judge_name,
-                    len(result.cases),
-                    len(result.pdfs),
+                    result.cases_after_filter,
                 )
                 current_job = None
 
             except Exception as e:
                 logger.error(
-                    "Submission failed for judge %s: %s", judge_name, e
+                    "Failed to mark job complete for %s: %s",
+                    judge_name,
+                    e,
                 )
                 try:
                     await client.fail_job(
-                        judge_name, f"Submission error: {e}"
+                        judge_name, f"Complete call failed: {e}"
                     )
                 except Exception:
                     pass

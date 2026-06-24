@@ -56,6 +56,7 @@ async def claim_next_job(
             status=rec.status,
             cases_collected=rec.cases_collected or 0,
             max_cases=rec.max_cases or 0,
+            total_count_at_start=rec.total_count_at_start or 0,
             retry_count=rec.retry_count or 0,
         )
     finally:

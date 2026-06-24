@@ -43,13 +43,17 @@ class JudgeCourtNotFoundError(Exception):
 class PlaywrightScraper:
     """Scraper using Playwright for DDOS-Guard bypass."""
     
-    def __init__(self, config: ConfigManager, headless: bool = True):
+    def __init__(self, config: ConfigManager, headless: bool = True,
+                 socks_proxy: Optional[str] = None):
         """
         Initialize Playwright scraper.
         
         Args:
             config: Configuration manager
             headless: Run browser in headless mode
+            socks_proxy: Direct SOCKS5 proxy URL (e.g. "socks5://127.0.0.1:10001").
+                         Used by distributed workers with microsocks.
+                         Overrides config-based proxy when provided.
         """
         self.config = config
         self.headless = headless
@@ -72,13 +76,20 @@ class PlaywrightScraper:
         self.last_judge_id: Optional[str] = None
 
         # Proxy configuration
-        self.proxy_enabled = config.get("scraping.proxy.enabled", False)
+        self.proxy_enabled = False
         self.proxy_server = None
         self.proxy_username = None
         self.proxy_password = None
         self.proxy_port: Optional[int] = None
 
-        if self.proxy_enabled:
+        if socks_proxy:
+            # Direct SOCKS5 proxy (distributed workers with microsocks)
+            self.proxy_enabled = True
+            self.proxy_server = socks_proxy
+            logger.info("Playwright SOCKS5 proxy enabled: %s", socks_proxy)
+        elif config.get("scraping.proxy.enabled", False):
+            # Legacy config-based proxy (residential pool)
+            self.proxy_enabled = True
             proxy_host = config.get("scraping.proxy.host")
             proxy_user = config.get("scraping.proxy.username")
             proxy_pass = config.get("scraping.proxy.password")

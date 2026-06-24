@@ -65,6 +65,7 @@ class JobClaimResponse(BaseModel):
     status: str
     cases_collected: int = 0
     max_cases: int = 0
+    total_count_at_start: int = 0
     retry_count: int = 0
 
 
