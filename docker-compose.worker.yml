@@ -1,0 +1,37 @@
+services:
+  worker-1:
+    image: arbitr-worker:latest
+    environment:
+      WORKER_ID: vps-tw-01-w1
+      VPS_ID: vps-tw-01
+      ORCHESTRATOR_URL: "INPUT_ORCHESTRATOR_URL"
+      API_KEY: "INPUT_API_KEY"
+      PROXY_PORT: 10001
+      PROXY_BIND_IP: 1.2.3.4
+      CONFIG_PATH: configs/main.yaml
+    restart: unless-stopped
+
+  worker-2:
+    image: arbitr-worker:latest
+    environment:
+      WORKER_ID: vps-tw-01-w2
+      VPS_ID: vps-tw-01
+      ORCHESTRATOR_URL: "INPUT_ORCHESTRATOR_URL"
+      API_KEY: "INPUT_API_KEY"
+      PROXY_PORT: 10002
+      PROXY_BIND_IP: 1.2.3.5
+      CONFIG_PATH: configs/main.yaml
+    restart: unless-stopped
+
+  worker-3:
+    image: arbitr-worker:latest
+    environment:
+      WORKER_ID: vps-tw-01-w3
+      VPS_ID: vps-tw-01
+      ORCHESTRATOR_URL: http://91.210.171.191:8000
+      API_KEY: "INPUT_API_KEY"
+      PROXY_PORT: 10002
+      PROXY_PORT: 10003
+      PROXY_BIND_IP: 1.2.3.6
+      CONFIG_PATH: configs/main.yaml
+    restart: unless-stopped

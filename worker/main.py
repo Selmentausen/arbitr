@@ -61,10 +61,14 @@ async def _execute_command(
     command: dict,
     client: OrchestratorClient,
     proxy: Optional[ProxyManager],
-) -> None:
-    """Execute a command received from the orchestrator."""
+) -> bool:
+    """
+    Execute a command received from the orchestrator.
+    Returns True if successfully executed, False otherwise.
+    """
     cmd_type = command.get("type")
     logger.info("Executing command: %s", cmd_type)
+    success = True
 
     if cmd_type == "rotate_ip":
         new_ip = command.get("new_ip")
@@ -79,23 +83,39 @@ async def _execute_command(
         )
 
         if proxy and new_ip:
-            try:
-                proxy.restart(new_bind_ip=new_ip)
-                # Re-register with the new IP
-                await client.register(
-                    ip_address=new_ip,
-                    proxy_port=proxy_port,
-                )
-                logger.info("IP rotation complete. New IP: %s", new_ip)
-            except Exception as e:
-                logger.error("IP rotation failed: %s", e)
+            success = False
+            # Retrying proxy restart as binding new IP might take time on VPS OS network interface
+            max_attempts = 12
+            for attempt in range(max_attempts):
+                try:
+                    proxy.restart(new_bind_ip=new_ip)
+                    # Re-register with the new IP
+                    await client.register(
+                        ip_address=new_ip,
+                        proxy_port=proxy_port,
+                    )
+                    logger.info("IP rotation complete. New IP: %s", new_ip)
+                    success = True
+                    break
+                except Exception as e:
+                    logger.warning(
+                        "IP rotation attempt %d/%d failed: %s. Retrying in 10s...",
+                        attempt + 1,
+                        max_attempts,
+                        e,
+                    )
+                    await asyncio.sleep(10)
+
+            if not success:
+                logger.error("IP rotation failed permanently after %d attempts", max_attempts)
                 await client.report_blocked(
-                    f"Rotation failed: {e}"
+                    f"Rotation failed permanently after {max_attempts} attempts"
                 )
         else:
             logger.error(
                 "Cannot rotate: proxy=%s, new_ip=%s", proxy, new_ip
             )
+            success = False
 
     elif cmd_type == "shutdown":
         logger.info("Orchestrator requested shutdown")
@@ -104,8 +124,10 @@ async def _execute_command(
 
     else:
         logger.warning("Unknown command type: %s", cmd_type)
+        success = False
 
     client.clear_command()
+    return success
 
 
 async def _wait_for_rotation(
@@ -126,11 +148,17 @@ async def _wait_for_rotation(
         if not command:
             continue
 
-        await _execute_command(command, client, proxy)
+        cmd_type = command.get("type")
+        success = await _execute_command(command, client, proxy)
 
-        if command.get("type") == "rotate_ip":
-            logger.info("IP rotated. Resuming work.")
-            break
+        if cmd_type == "rotate_ip":
+            if success:
+                logger.info("IP rotated successfully. Resuming work.")
+                break
+            else:
+                logger.warning(
+                    "IP rotation failed. Staying in block-wait state for new command or retry."
+                )
 
 
 async def run_worker():
@@ -164,6 +192,7 @@ async def run_worker():
         proxy = ProxyManager(
             bind_ip=config.proxy_bind_ip,
             port=config.proxy_port,
+            net_interface=config.net_interface,
         )
         try:
             proxy.start()
@@ -201,9 +230,11 @@ async def run_worker():
             # Check for pending commands first
             command = client.get_pending_command()
             if command:
-                await _execute_command(command, client, proxy)
+                success = await _execute_command(command, client, proxy)
                 if _shutdown:
                     break
+                if command.get("type") == "rotate_ip" and not success:
+                    await _wait_for_rotation(client, proxy)
                 continue
 
             # Claim next job

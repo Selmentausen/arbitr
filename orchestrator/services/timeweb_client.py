@@ -77,8 +77,29 @@ class TimewebClient:
         resp = await client.get(f"{self.BASE_URL}/servers")
         resp.raise_for_status()
         data = resp.json()
-        # TODO: Parse actual Timeweb response format
-        return []
+        
+        servers = []
+        for s in data.get("servers", []):
+            ips = []
+            # Parse network IPs
+            for net in s.get("networks", []):
+                for ip_item in net.get("ips", []):
+                    ips.append(
+                        FloatingIpInfo(
+                            ip=ip_item["ip"],
+                            id=ip_item["ip"],
+                            status="active",
+                        )
+                    )
+            servers.append(
+                ServerInfo(
+                    id=str(s["id"]),
+                    name=s["name"],
+                    status=s["status"],
+                    ips=ips,
+                )
+            )
+        return servers
 
     async def get_server(self, server_id: str) -> Optional[ServerInfo]:
         """Get details of a specific VPS."""
@@ -87,22 +108,53 @@ class TimewebClient:
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        # TODO: Parse actual Timeweb response format
-        return None
+        data = resp.json()
+        s = data.get("server", {})
+        if not s:
+            return None
+            
+        ips = []
+        for net in s.get("networks", []):
+            for ip_item in net.get("ips", []):
+                ips.append(
+                    FloatingIpInfo(
+                        ip=ip_item["ip"],
+                        id=ip_item["ip"],
+                        status="active",
+                    )
+                )
+        return ServerInfo(
+            id=str(s["id"]),
+            name=s["name"],
+            status=s["status"],
+            ips=ips,
+        )
 
     # ------------------------------------------------------------------
-    # Floating IP management
+    # Floating IP management (actually secondary IPs associated with server)
     # ------------------------------------------------------------------
 
     async def list_floating_ips(self, server_id: str) -> List[FloatingIpInfo]:
-        """List all floating IPs assigned to a server."""
+        """List all secondary (floating) IPs assigned to a server."""
         client = await self._get_client()
         resp = await client.get(
             f"{self.BASE_URL}/servers/{server_id}/ips"
         )
         resp.raise_for_status()
-        # TODO: Parse actual Timeweb response format
-        return []
+        data = resp.json()
+        
+        ips = []
+        for item in data.get("ips", []):
+            if item.get("is_main", False):
+                continue
+            ips.append(
+                FloatingIpInfo(
+                    ip=item["ip"],
+                    id=item["ip"],
+                    status="active",
+                )
+            )
+        return ips
 
     async def assign_floating_ip(self, server_id: str) -> Optional[FloatingIpInfo]:
         """
@@ -119,13 +171,21 @@ class TimewebClient:
             logger.warning("Floating IP quota exceeded for server %s", server_id)
             return None
         resp.raise_for_status()
-        # TODO: Parse actual Timeweb response format
-        return None
+        data = resp.json()
+        ip_data = data.get("ip", {})
+        if not ip_data or "ip" not in ip_data:
+            return None
+            
+        return FloatingIpInfo(
+            ip=ip_data["ip"],
+            id=ip_data["ip"],
+            status="active",
+        )
 
     async def release_floating_ip(
         self, server_id: str, ip_id: str
     ) -> bool:
-        """Release a floating IP from a server."""
+        """Release a floating IP from a server (using IP address as ID)."""
         client = await self._get_client()
         resp = await client.delete(
             f"{self.BASE_URL}/servers/{server_id}/ips/{ip_id}"

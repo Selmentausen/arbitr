@@ -172,7 +172,7 @@ class TestSaveAndGet:
             plaintiff="П",
             defendant="О",
         )
-        record = repo.save_case(case_base)
+        record = repo.save_case(case)
         assert record.id == "base-uuid-001"
 
         case = repo.get_case("base-uuid-001")

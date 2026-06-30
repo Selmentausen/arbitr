@@ -86,6 +86,9 @@ class WorkerConfig:
     no_stealth: bool = field(
         default_factory=lambda: os.environ.get("NO_STEALTH", "false").lower() == "true"
     )
+    net_interface: Optional[str] = field(
+        default_factory=lambda: os.environ.get("NETWORK_INTERFACE")
+    )
 
     def __repr__(self) -> str:
         return (

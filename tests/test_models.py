@@ -242,7 +242,7 @@ class TestCase:
 
     def test_case_from_case_base(self):
         """Test creating Case from basic data."""
-        case = Case(
+        case_base = Case(
             id="A40-123456/2024",
             case_number="А40-123456/2024",
             court="Арбитражный суд города Москвы",
