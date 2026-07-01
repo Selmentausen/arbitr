@@ -6,7 +6,7 @@ Handles job claiming, progress updates, completion, failure, and release.
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from orchestrator.middleware.auth import verify_api_key
 from orchestrator.models.api_schemas import (
@@ -29,14 +29,19 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 @router.get("/next", response_model=JobClaimResponse)
 async def claim_next_job(
     worker_id: str,
+    request: Request,
     _: str = Depends(verify_api_key),
 ):
     """
     Claim the next available judge for scraping.
 
     Uses FOR UPDATE SKIP LOCKED on PostgreSQL for safe concurrent access.
-    Returns 204 if no jobs are available.
+    Returns 204 if no jobs are available or if scraping is paused.
     """
+    # Block job claims when scraping is paused
+    if getattr(request.app.state, "scraping_paused", True):
+        raise HTTPException(status_code=204, detail="Scraping is paused")
+
     session = get_session()
     try:
         repo = CaseRepository(session)

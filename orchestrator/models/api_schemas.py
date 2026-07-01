@@ -184,6 +184,7 @@ class DashboardStats(BaseModel):
     active_workers: int = 0
     blocked_workers: int = 0
     offline_workers: int = 0
+    scraping_paused: bool = False
 
 
 class ThroughputMetrics(BaseModel):

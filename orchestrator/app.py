@@ -88,6 +88,10 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Background worker monitor started")
 
+    # 5. Initialize fleet control state
+    app.state.scraping_paused = True
+    logger.info("Fleet scraping state: INACTIVE")
+
     yield  # Application runs here
 
     # Shutdown

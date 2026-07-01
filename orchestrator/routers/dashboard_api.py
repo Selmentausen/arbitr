@@ -6,7 +6,7 @@ Provides aggregate statistics, throughput metrics, and fleet status for the dash
 
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func
 
 from orchestrator.middleware.auth import verify_api_key
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 @router.get("/stats", response_model=DashboardStats)
 async def get_stats(
+    request: Request,
     _: str = Depends(verify_api_key),
 ):
     """Get aggregate dashboard statistics."""
@@ -62,6 +63,7 @@ async def get_stats(
             active_workers=worker_counts.get("active", 0),
             blocked_workers=worker_counts.get("blocked", 0),
             offline_workers=worker_counts.get("offline", 0),
+            scraping_paused=getattr(request.app.state, "scraping_paused", True),
         )
     finally:
         session.close()

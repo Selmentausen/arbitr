@@ -8,16 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     libpq5 \
     xvfb \
-    git \
-    iproute2 \
     && rm -rf /var/lib/apt/lists/*
-
-# Compile and install microsocks
-RUN git clone https://github.com/rofl0r/microsocks.git /tmp/microsocks \
-    && cd /tmp/microsocks \
-    && make \
-    && cp microsocks /usr/local/bin/ \
-    && rm -rf /tmp/microsocks
 
 # Install Poetry
 RUN pip install --no-cache-dir poetry==1.8.5

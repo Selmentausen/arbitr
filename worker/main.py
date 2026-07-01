@@ -122,6 +122,14 @@ async def _execute_command(
         global _shutdown
         _shutdown = True
 
+    elif cmd_type == "pause":
+        logger.info("Orchestrator requested pause — will enter idle loop")
+        # Actual idling is handled by the main scrape loop
+
+    elif cmd_type == "resume":
+        logger.info("Orchestrator requested resume — exiting idle loop")
+        # Actual resume is handled by the main scrape loop
+
     else:
         logger.warning("Unknown command type: %s", cmd_type)
         success = False
@@ -230,12 +238,35 @@ async def run_worker():
             # Check for pending commands first
             command = client.get_pending_command()
             if command:
+                cmd_type = command.get("type")
                 success = await _execute_command(command, client, proxy)
                 if _shutdown:
                     break
-                if command.get("type") == "rotate_ip" and not success:
+                if cmd_type == "rotate_ip" and not success:
                     await _wait_for_rotation(client, proxy)
-                continue
+                    continue
+                if cmd_type == "pause":
+                    # Enter idle loop until resume
+                    logger.info(
+                        "⏸ Scraping paused by orchestrator. Idling..."
+                    )
+                    while not _shutdown:
+                        await asyncio.sleep(config.heartbeat_interval)
+                        resume_cmd = client.get_pending_command()
+                        if resume_cmd:
+                            resume_type = resume_cmd.get("type")
+                            await _execute_command(
+                                resume_cmd, client, proxy
+                            )
+                            if _shutdown:
+                                break
+                            if resume_type == "resume":
+                                logger.info(
+                                    "▶ Scraping resumed by orchestrator."
+                                )
+                                break
+                            # If it's another pause, stay in the loop
+                    continue
 
             # Claim next job
             logger.info("Polling for next job...")

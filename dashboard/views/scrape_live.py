@@ -1,6 +1,9 @@
 """Live scraping throughput dashboard page."""
 
+import os
+
 import pandas as pd
+import requests
 import streamlit as st
 import plotly.express as px
 
@@ -13,10 +16,54 @@ except ImportError:
 
 repo = get_db()
 
+# --- Orchestrator API helpers (localhost) ---
+_ORCH_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
+_API_KEY = os.environ.get("API_KEY", "dev-key-change-me")
+_HEADERS = {"Authorization": f"Bearer {_API_KEY}"}
+
+
+def _get_fleet_status() -> bool:
+    """Returns True if scraping is paused."""
+    try:
+        r = requests.get(f"{_ORCH_URL}/api/fleet/status", headers=_HEADERS, timeout=3)
+        if r.ok:
+            return r.json().get("data", {}).get("scraping_paused", True)
+    except Exception:
+        pass
+    return False
+
+
+def _set_fleet_pause(pause: bool) -> str:
+    """Pause or resume the fleet. Returns response message."""
+    endpoint = "pause" if pause else "resume"
+    try:
+        r = requests.post(f"{_ORCH_URL}/api/fleet/{endpoint}", headers=_HEADERS, timeout=5)
+        if r.ok:
+            return r.json().get("message", "OK")
+        return f"Error: {r.status_code}"
+    except Exception as e:
+        return f"Connection error: {e}"
+
+
 st.title("⚡ Скрапинг — Live")
 
 if st_autorefresh is not None:
     st_autorefresh(interval=5000, key="scrape_live_refresh")
+
+# --- Pause / Resume control ---
+is_paused = _get_fleet_status()
+
+if is_paused:
+    st.error("🔴 **СКРАПИНГ ПРИОСТАНОВЛЕН** — воркеры не берут новые задания.")
+    if st.button("▶️ Возобновить скрапинг", type="primary", key="resume_btn"):
+        msg = _set_fleet_pause(False)
+        st.success(msg)
+        st.rerun()
+else:
+    if st.button("⏸️ Приостановить скрапинг", type="secondary", key="pause_btn"):
+        msg = _set_fleet_pause(True)
+        st.warning(msg)
+        st.rerun()
 
 tp = repo.get_throughput()
 

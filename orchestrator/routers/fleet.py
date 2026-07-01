@@ -159,3 +159,45 @@ async def rotation_stats(
         message="Rotation statistics",
         data=stats,
     )
+
+
+@router.post("/pause", response_model=StatusResponse)
+async def pause_scraping(
+    request: Request,
+    _: str = Depends(verify_api_key),
+):
+    """Pause all scraping — workers will stop claiming new jobs."""
+    request.app.state.scraping_paused = True
+    logger.info("Fleet scraping PAUSED by dashboard/API")
+    return StatusResponse(
+        ok=True,
+        message="Scraping paused. Workers will finish current batches and idle.",
+    )
+
+
+@router.post("/resume", response_model=StatusResponse)
+async def resume_scraping(
+    request: Request,
+    _: str = Depends(verify_api_key),
+):
+    """Resume scraping — workers will start claiming jobs again."""
+    request.app.state.scraping_paused = False
+    logger.info("Fleet scraping RESUMED by dashboard/API")
+    return StatusResponse(
+        ok=True,
+        message="Scraping resumed. Workers will start claiming jobs.",
+    )
+
+
+@router.get("/status", response_model=StatusResponse)
+async def fleet_status(
+    request: Request,
+    _: str = Depends(verify_api_key),
+):
+    """Get current fleet control status."""
+    paused = getattr(request.app.state, "scraping_paused", False)
+    return StatusResponse(
+        ok=True,
+        message="paused" if paused else "active",
+        data={"scraping_paused": paused},
+    )

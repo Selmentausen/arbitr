@@ -91,6 +91,12 @@ async def worker_heartbeat(
                 command.get("type"), worker_id,
             )
 
+        # If no higher-priority command, inject pause/resume signals
+        if not command:
+            is_paused = getattr(request.app.state, "scraping_paused", False)
+            if is_paused:
+                command = {"type": "pause"}
+
         return WorkerHeartbeatResponse(
             ok=True,
             message="Heartbeat received",

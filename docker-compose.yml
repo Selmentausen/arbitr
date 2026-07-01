@@ -109,6 +109,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://${PG_USER:-arbitr}:${PG_PASSWORD:-arbitr}@postgres:5432/${PG_DATABASE:-arbitr}
       ORCHESTRATOR_URL: http://orchestrator:8000
+      API_KEY: ${API_KEY:-dev-key-change-me}
     ports:
       - "8501:8501"
     depends_on:
